@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
 import torch.nn as nn
 from opacus.grad_sample.gsm_base import AbstractGradSampleModule
 
@@ -42,11 +41,13 @@ class GradSampleModuleExpandedWeights(AbstractGradSampleModule):
             loss_reduction=loss_reduction,
         )
 
-    def forward(self, x: torch.Tensor, *args, **kwargs):
+    def forward(self, *args, **kwargs):
         from torch.nn.utils._per_sample_grad import call_for_per_sample_grads
+
+        if "num_items_in_batch" in kwargs:
+            kwargs.pop("num_items_in_batch")
 
         return call_for_per_sample_grads(
             module=self._module,
-            batch_size=x.shape[0],
             loss_reduction=self.loss_reduction,
-        )(x, *args, **kwargs)
+        )(*args, **kwargs)
