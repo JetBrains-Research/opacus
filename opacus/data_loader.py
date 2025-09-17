@@ -93,8 +93,8 @@ def wrap_collate_with_empty(
                 has the first dimension representing the batch. If set to True, dimensions on
                 input tensor are expected be ``[batch_size, ...]``, otherwise
                 ``[K, batch_size, ...]``
-        zeroes_on_empty: expected shape for a batch of size 0. Input is a sequence -
-            one for each tensor in the dataset
+        zeros_on_empty: set ``True`` to return a batch containing zeros when encountering
+            empty batches rather than tensors with zero-length batch dimensions
 
     Returns:
         New collate function, which is equivalent to input ``collate_fn`` for non-empty
