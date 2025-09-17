@@ -29,40 +29,6 @@ from torch.utils.data.dataloader import _collate_fn_t
 logger = logging.getLogger(__name__)
 
 
-def collate(
-    batch: List[torch.Tensor],
-    *,
-    collate_fn: Optional[_collate_fn_t],
-    sample_empty_shapes: Sequence[Tuple],
-    dtypes: Sequence[Union[torch.dtype, Type]],
-):
-    """
-    Wraps `collate_fn` to handle empty batches.
-
-    Default `collate_fn` implementations typically can't handle batches of length zero.
-    Since this is a possible case for poisson sampling, we need to wrap the collate
-    method, producing tensors with the correct shape and size (albeit the batch
-    dimension being zero-size)
-
-    Args:
-        batch: List of tensort to be passed to collate_fn implementation
-        collate_fn: Collame method to be wrapped
-        sample_empty_shapes: Sample tensors with the expected shape
-        dtypes: Expected dtypes
-
-    Returns:
-        Batch tensor(s)
-    """
-
-    if len(batch) > 0:
-        return collate_fn(batch)
-    else:
-        return [
-            torch.zeros(shape, dtype=dtype)
-            for shape, dtype in zip(sample_empty_shapes, dtypes)
-        ]
-
-
 class CollateFnWithEmpty:
     empty_shape = None
 
@@ -107,8 +73,6 @@ class CollateFnWithEmpty:
 def wrap_collate_with_empty(
     *,
     collate_fn: Optional[_collate_fn_t],
-    sample_empty_shapes: Sequence[Tuple],
-    dtypes: Sequence[Union[torch.dtype, Type]],
 ):
     """
     Wraps given collate function to handle empty batches.
@@ -238,8 +202,6 @@ class DPDataLoader(DataLoader):
             batch_sampler=batch_sampler,
             collate_fn=wrap_collate_with_empty(
                 collate_fn=collate_fn,
-                sample_empty_shapes=sample_empty_shapes,
-                dtypes=dtypes,
             ),
             generator=generator,
             **kwargs,
