@@ -14,7 +14,7 @@
 
 import logging
 from functools import partial
-from typing import Any, List, Optional, Sequence, Tuple, Type, Union
+from typing import Any, List, Optional, Sequence, Tuple, Type, Union, Mapping
 
 import torch
 from opacus.utils.uniform_sampler import (
@@ -63,6 +63,47 @@ def collate(
         ]
 
 
+class CollateFnWithEmpty:
+    empty_shape = None
+
+    def __init__(self, collator_fn, batch_first=True):
+        self.wrapped_colator_fn = collator_fn
+        if not batch_first:
+            raise ValueError("Jebiga... batch_first=False is not supported yet...")
+
+    def __call__(self, batch):
+        if len(batch) > 0:
+            if not self.wrapped_colator_fn:
+                output = batch
+            else:
+                output = self.wrapped_colator_fn(batch)
+            if self.empty_shape is None:
+                self.empty_shape = self._make_empty_batch(output)  # List[torch.Tensor] or Dict[str, torch.Tensor]
+        else:
+            if self.empty_shape is None:
+                raise ValueError("Jebiga... At least the first sampled batch shouldn't be empty...")
+
+            output = self.empty_shape  # materialize into empty with the same structure as list/dict
+
+        return output
+
+    def _make_empty_batch(self, sample):
+        if torch.is_tensor(sample):
+            shape = list(sample.shape)
+            # If it's at least 1D, set batch dim to 1; otherwise make a 0-length 1D tensor
+            shape[0] = 1 if len(shape) >= 1 else [0]
+            return sample.new_zeros(shape, dtype=sample.dtype).detach()
+
+        if isinstance(sample, Mapping):
+            return {k: self._make_empty_batch(v) for k, v in sample.items()}
+
+        if isinstance(sample, (list, tuple)):
+            converted = [self._make_empty_batch(v) for v in sample]
+            return type(sample)(converted)
+
+        # base case
+        return sample
+
 def wrap_collate_with_empty(
     *,
     collate_fn: Optional[_collate_fn_t],
@@ -83,12 +124,7 @@ def wrap_collate_with_empty(
         the input batch is of size 0
     """
 
-    return partial(
-        collate,
-        collate_fn=collate_fn,
-        sample_empty_shapes=sample_empty_shapes,
-        dtypes=dtypes,
-    )
+    return CollateFnWithEmpty(collate_fn, batch_first=True)
 
 
 def shape_safe(x: Any) -> Tuple:
