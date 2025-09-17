@@ -74,8 +74,9 @@ class CollateFnWithEmpty:
     def __call__(self, batch):
         if len(batch) > 0:
             if not self.wrapped_colator_fn:
-                return batch
-            output = self.wrapped_colator_fn(batch)
+                output = batch
+            else:
+                output = self.wrapped_colator_fn(batch)
             if self.empty_shape is None:
                 self.empty_shape = self._make_empty_batch(output)  # List[torch.Tensor] or Dict[str, torch.Tensor]
         else:
