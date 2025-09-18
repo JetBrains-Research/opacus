@@ -14,7 +14,7 @@
 
 import logging
 from functools import partial
-from typing import Any, List, Optional, Sequence, Tuple, Type, Union, Mapping
+from typing import Any, List, Mapping, Optional, Sequence, Tuple, Type, Union
 
 import torch
 from opacus.utils.uniform_sampler import (
@@ -29,47 +29,13 @@ from torch.utils.data.dataloader import _collate_fn_t
 logger = logging.getLogger(__name__)
 
 
-def collate(
-    batch: List[torch.Tensor],
-    *,
-    collate_fn: Optional[_collate_fn_t],
-    sample_empty_shapes: Sequence[Tuple],
-    dtypes: Sequence[Union[torch.dtype, Type]],
-):
-    """
-    Wraps `collate_fn` to handle empty batches.
-
-    Default `collate_fn` implementations typically can't handle batches of length zero.
-    Since this is a possible case for poisson sampling, we need to wrap the collate
-    method, producing tensors with the correct shape and size (albeit the batch
-    dimension being zero-size)
-
-    Args:
-        batch: List of tensort to be passed to collate_fn implementation
-        collate_fn: Collame method to be wrapped
-        sample_empty_shapes: Sample tensors with the expected shape
-        dtypes: Expected dtypes
-
-    Returns:
-        Batch tensor(s)
-    """
-
-    if len(batch) > 0:
-        return collate_fn(batch)
-    else:
-        return [
-            torch.zeros(shape, dtype=dtype)
-            for shape, dtype in zip(sample_empty_shapes, dtypes)
-        ]
-
-
 class CollateFnWithEmpty:
     empty_shape = None
 
-    def __init__(self, collator_fn, batch_first=True):
+    def __init__(self, collator_fn, batch_first=True, zeroes_on_empty=False):
         self.wrapped_colator_fn = collator_fn
-        if not batch_first:
-            raise ValueError("Jebiga... batch_first=False is not supported yet...")
+        self.batch_first = batch_first
+        self.zeroes_on_empty = zeroes_on_empty
 
     def __call__(self, batch):
         if len(batch) > 0:
@@ -78,12 +44,18 @@ class CollateFnWithEmpty:
             else:
                 output = self.wrapped_colator_fn(batch)
             if self.empty_shape is None:
-                self.empty_shape = self._make_empty_batch(output)  # List[torch.Tensor] or Dict[str, torch.Tensor]
+                self.empty_shape = self._make_empty_batch(
+                    output
+                )  # List[torch.Tensor] or Dict[str, torch.Tensor]
         else:
             if self.empty_shape is None:
-                raise ValueError("Jebiga... At least the first sampled batch shouldn't be empty...")
+                raise ValueError(
+                    "Jebiga... At least the first sampled batch shouldn't be empty..."
+                )
 
-            output = self.empty_shape  # materialize into empty with the same structure as list/dict
+            output = (
+                self.empty_shape
+            )  # materialize into empty with the same structure as list/dict
 
         return output
 
@@ -91,8 +63,9 @@ class CollateFnWithEmpty:
         if torch.is_tensor(sample):
             shape = list(sample.shape)
             # If it's at least 1D, set batch dim to 1; otherwise make a 0-length 1D tensor
-            shape[0] = 1 if len(shape) >= 1 else [0]
-            return sample.new_empty(shape, dtype=sample.dtype).detach()
+            batch_dim = 0 if self.batch_first else 1
+            shape[batch_dim] = 1 if self.zeroes_on_empty else 0
+            return sample.new_zeros(shape, dtype=sample.dtype, device=sample.device)
 
         if isinstance(sample, Mapping):
             return {k: self._make_empty_batch(v) for k, v in sample.items()}
@@ -104,19 +77,24 @@ class CollateFnWithEmpty:
         # base case
         return sample
 
+
 def wrap_collate_with_empty(
     *,
     collate_fn: Optional[_collate_fn_t],
-    sample_empty_shapes: Sequence[Tuple],
-    dtypes: Sequence[Union[torch.dtype, Type]],
+    batch_first: bool = True,
+    zeroes_on_empty: bool = False,
 ):
     """
     Wraps given collate function to handle empty batches.
 
     Args:
         collate_fn: collate function to wrap
-        sample_empty_shapes: expected shape for a batch of size 0. Input is a sequence -
-            one for each tensor in the dataset
+        batch_first: Flag to indicate if the input tensor to the corresponding module
+                has the first dimension representing the batch. If set to True, dimensions on
+                input tensor are expected be ``[batch_size, ...]``, otherwise
+                ``[K, batch_size, ...]``
+        zeros_on_empty: set ``True`` to return a batch containing zeros when encountering
+            empty batches rather than tensors with zero-length batch dimensions
 
     Returns:
         New collate function, which is equivalent to input ``collate_fn`` for non-empty
@@ -124,33 +102,9 @@ def wrap_collate_with_empty(
         the input batch is of size 0
     """
 
-    return CollateFnWithEmpty(collate_fn, batch_first=True)
-
-
-def shape_safe(x: Any) -> Tuple:
-    """
-    Exception-safe getter for ``shape`` attribute
-
-    Args:
-        x: any object
-
-    Returns:
-        ``x.shape`` if attribute exists, empty tuple otherwise
-    """
-    return getattr(x, "shape", ())
-
-
-def dtype_safe(x: Any) -> Union[torch.dtype, Type]:
-    """
-    Exception-safe getter for ``dtype`` attribute
-
-    Args:
-        x: any object
-
-    Returns:
-        ``x.dtype`` if attribute exists, type of x otherwise
-    """
-    return getattr(x, "dtype", type(x))
+    return CollateFnWithEmpty(
+        collate_fn, batch_first=batch_first, zeroes_on_empty=zeroes_on_empty
+    )
 
 
 class DPDataLoader(DataLoader):
@@ -185,6 +139,8 @@ class DPDataLoader(DataLoader):
         drop_last: bool = False,
         generator=None,
         distributed: bool = False,
+        batch_first: bool = True,
+        zeros_on_empty: bool = False,
         **kwargs,
     ):
         """
@@ -206,6 +162,8 @@ class DPDataLoader(DataLoader):
             distributed: set ``True`` if you'll be using DPDataLoader in a DDP environment
                 Selects between ``DistributedUniformWithReplacementSampler`` and
                 ``UniformWithReplacementSampler`` sampler implementations
+            zeros_on_empty: set ``True`` to return a batch containing zeros when encountering
+                empty batches rather than tensors with zero-length batch dimensions
         """
 
         self.sample_rate = sample_rate
@@ -223,8 +181,6 @@ class DPDataLoader(DataLoader):
                 sample_rate=sample_rate,
                 generator=generator,
             )
-        sample_empty_shapes = [(0, *shape_safe(x)) for x in dataset[0]]
-        dtypes = [dtype_safe(x) for x in dataset[0]]
         if collate_fn is None:
             collate_fn = default_collate
 
@@ -238,8 +194,8 @@ class DPDataLoader(DataLoader):
             batch_sampler=batch_sampler,
             collate_fn=wrap_collate_with_empty(
                 collate_fn=collate_fn,
-                sample_empty_shapes=sample_empty_shapes,
-                dtypes=dtypes,
+                batch_first=batch_first,
+                zeroes_on_empty=zeros_on_empty,
             ),
             generator=generator,
             **kwargs,
@@ -247,7 +203,13 @@ class DPDataLoader(DataLoader):
 
     @classmethod
     def from_data_loader(
-        cls, data_loader: DataLoader, *, distributed: bool = False, generator=None
+        cls,
+        data_loader: DataLoader,
+        *,
+        distributed: bool = False,
+        generator=None,
+        batch_first: bool = True,
+        zeros_on_empty: bool = False,
     ):
         """
         Creates new ``DPDataLoader`` based on passed ``data_loader`` argument.
@@ -286,6 +248,8 @@ class DPDataLoader(DataLoader):
             prefetch_factor=data_loader.prefetch_factor,
             persistent_workers=data_loader.persistent_workers,
             distributed=distributed,
+            batch_first=batch_first,
+            zeros_on_empty=zeros_on_empty,
         )
 
 
