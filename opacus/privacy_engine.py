@@ -147,7 +147,7 @@ class PrivacyEngine:
         poisson_sampling: bool,
         distributed: bool,
         batch_first: bool = True,
-        zeros_on_empty: bool = False,
+        rand_on_empty: bool = False,
     ) -> DataLoader:
         if self.dataset is None:
             self.dataset = data_loader.dataset
@@ -167,7 +167,7 @@ class PrivacyEngine:
                 generator=self.secure_rng,
                 distributed=distributed,
                 batch_first=batch_first,
-                zeros_on_empty=zeros_on_empty,
+                rand_on_empty=rand_on_empty,
             )
         elif self.secure_mode:
             return switch_generator(data_loader=data_loader, generator=self.secure_rng)
@@ -315,7 +315,7 @@ class PrivacyEngine:
         clipping: str = "flat",
         noise_generator=None,
         grad_sample_mode: str = "hooks",
-        zeros_on_empty: bool = False,
+        rand_on_empty: bool = False,
         **kwargs,
     ) -> Union[
         Tuple[GradSampleModule, DPOptimizer, DataLoader],
@@ -369,7 +369,7 @@ class PrivacyEngine:
                 implementation class for the wrapped ``module``. See
                 :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
                 details
-            zeros_on_empty: Indicates to return a batch containing zeros when encountering
+            rand_on_empty: Indicates to return a batch containing random numbers when encountering
                 empty batches samples with Poisson sampling rather than tensors with zero-length batch dimensions
 
         Returns:
@@ -415,7 +415,7 @@ class PrivacyEngine:
             distributed=distributed,
             poisson_sampling=poisson_sampling,
             batch_first=batch_first,
-            zeros_on_empty=zeros_on_empty,
+            rand_on_empty=rand_on_empty,
         )
 
         sample_rate = 1 / len(data_loader)

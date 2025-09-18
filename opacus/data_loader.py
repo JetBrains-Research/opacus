@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import copy
 import logging
 from functools import partial
 from typing import Any, List, Mapping, Optional, Sequence, Tuple, Type, Union
@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 class CollateFnWithEmpty:
-    empty_shape = None
+    first_batch = None
 
-    def __init__(self, collator_fn, batch_first=True, zeroes_on_empty=False):
+    def __init__(self, collator_fn, batch_first=True, rand_on_empty=False):
         self.wrapped_colator_fn = collator_fn
         self.batch_first = batch_first
-        self.zeroes_on_empty = zeroes_on_empty
+        self.rand_on_empty = rand_on_empty
 
     def __call__(self, batch):
         if len(batch) > 0:
@@ -43,19 +43,16 @@ class CollateFnWithEmpty:
                 output = batch
             else:
                 output = self.wrapped_colator_fn(batch)
-            if self.empty_shape is None:
-                self.empty_shape = self._make_empty_batch(
-                    output
-                )  # List[torch.Tensor] or Dict[str, torch.Tensor]
+            if self.first_batch is None:
+                self.first_batch = copy.deepcopy(output)
         else:
-            if self.empty_shape is None:
+            if self.first_batch is None:
                 raise ValueError(
                     "Jebiga... At least the first sampled batch shouldn't be empty..."
                 )
 
-            output = (
-                self.empty_shape
-            )  # materialize into empty with the same structure as list/dict
+            # materialize into empty with the same structure as list/dict
+            output = self._make_empty_batch(self.first_batch)
 
         return output
 
@@ -64,8 +61,13 @@ class CollateFnWithEmpty:
             shape = list(sample.shape)
             # If it's at least 1D, set batch dim to 1; otherwise make a 0-length 1D tensor
             batch_dim = 0 if self.batch_first else 1
-            shape[batch_dim] = 1 if self.zeroes_on_empty else 0
-            return sample.new_zeros(shape, dtype=sample.dtype, device=sample.device)
+            shape[batch_dim] = 1 if self.rand_on_empty else 0
+            if self.rand_on_empty:
+                return torch.randint(
+                    0, 2, shape, dtype=sample.dtype, device=sample.device
+                )
+            else:
+                return torch.empty(shape, dtype=sample.dtype, device=sample.device)
 
         if isinstance(sample, Mapping):
             return {k: self._make_empty_batch(v) for k, v in sample.items()}
@@ -82,7 +84,7 @@ def wrap_collate_with_empty(
     *,
     collate_fn: Optional[_collate_fn_t],
     batch_first: bool = True,
-    zeroes_on_empty: bool = False,
+    rand_on_empty: bool = False,
 ):
     """
     Wraps given collate function to handle empty batches.
@@ -93,7 +95,7 @@ def wrap_collate_with_empty(
                 has the first dimension representing the batch. If set to True, dimensions on
                 input tensor are expected be ``[batch_size, ...]``, otherwise
                 ``[K, batch_size, ...]``
-        zeros_on_empty: set ``True`` to return a batch containing zeros when encountering
+        rand_on_empty: set ``True`` to return a batch containing random numbers when encountering
             empty batches rather than tensors with zero-length batch dimensions
 
     Returns:
@@ -103,7 +105,7 @@ def wrap_collate_with_empty(
     """
 
     return CollateFnWithEmpty(
-        collate_fn, batch_first=batch_first, zeroes_on_empty=zeroes_on_empty
+        collate_fn, batch_first=batch_first, rand_on_empty=rand_on_empty
     )
 
 
@@ -140,7 +142,7 @@ class DPDataLoader(DataLoader):
         generator=None,
         distributed: bool = False,
         batch_first: bool = True,
-        zeros_on_empty: bool = False,
+        rand_on_empty: bool = False,
         **kwargs,
     ):
         """
@@ -162,7 +164,7 @@ class DPDataLoader(DataLoader):
             distributed: set ``True`` if you'll be using DPDataLoader in a DDP environment
                 Selects between ``DistributedUniformWithReplacementSampler`` and
                 ``UniformWithReplacementSampler`` sampler implementations
-            zeros_on_empty: set ``True`` to return a batch containing zeros when encountering
+            rand_on_empty: set ``True`` to return a batch containing random numbers when encountering
                 empty batches rather than tensors with zero-length batch dimensions
         """
 
@@ -195,7 +197,7 @@ class DPDataLoader(DataLoader):
             collate_fn=wrap_collate_with_empty(
                 collate_fn=collate_fn,
                 batch_first=batch_first,
-                zeroes_on_empty=zeros_on_empty,
+                rand_on_empty=rand_on_empty,
             ),
             generator=generator,
             **kwargs,
@@ -209,7 +211,7 @@ class DPDataLoader(DataLoader):
         distributed: bool = False,
         generator=None,
         batch_first: bool = True,
-        zeros_on_empty: bool = False,
+        rand_on_empty: bool = False,
     ):
         """
         Creates new ``DPDataLoader`` based on passed ``data_loader`` argument.
@@ -219,6 +221,14 @@ class DPDataLoader(DataLoader):
             distributed: set ``True`` if you'll be using DPDataLoader in a DDP environment
             generator: Random number generator used to sample elements. Defaults to
                 generator from the original data loader.
+            batch_first: Flag to indicate if the input tensor to the corresponding module
+                has the first dimension representing the batch. If set to True, dimensions on
+                input tensor are expected be ``[batch_size, ...]``, otherwise
+                ``[K, batch_size, ...]``
+            rand_on_empty: set ``True`` to return a batch containing random numbers when encountering
+                empty batches rather than tensors with zero-length batch dimensions
+
+
 
         Returns:
             New DPDataLoader instance, with all attributes and parameters inherited
@@ -249,7 +259,7 @@ class DPDataLoader(DataLoader):
             persistent_workers=data_loader.persistent_workers,
             distributed=distributed,
             batch_first=batch_first,
-            zeros_on_empty=zeros_on_empty,
+            rand_on_empty=rand_on_empty,
         )
 
 
