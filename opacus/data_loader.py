@@ -92,7 +92,7 @@ class CollateFnWithEmpty:
             shape = list(sample.shape)
             # If it's at least 1D, set batch dim to 1; otherwise make a 0-length 1D tensor
             shape[0] = 1 if len(shape) >= 1 else [0]
-            return sample.new_zeros(shape, dtype=sample.dtype).detach()
+            return sample.new_empty(shape, dtype=sample.dtype).detach()
 
         if isinstance(sample, Mapping):
             return {k: self._make_empty_batch(v) for k, v in sample.items()}
