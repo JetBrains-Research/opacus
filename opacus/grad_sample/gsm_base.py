@@ -75,6 +75,10 @@ class AbstractGradSampleModule(nn.Module, ABC):
     def forward(self, *args, **kwargs):
         pass
 
+    @property
+    def module(self):
+        return self._module
+
     def __getattr__(self, item):
         try:
             return super().__getattr__(item)
@@ -82,7 +86,8 @@ class AbstractGradSampleModule(nn.Module, ABC):
             submodules = dict(self._module.named_modules())
             if item and item in submodules:
                 return submodules[item]
-            raise e
+
+            raise getattr(self._module, item)
 
     def zero_grad(self, set_to_none: bool = False):
         """
