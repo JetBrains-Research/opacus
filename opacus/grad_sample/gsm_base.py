@@ -87,7 +87,7 @@ class AbstractGradSampleModule(nn.Module, ABC):
             if item and item in submodules:
                 return submodules[item]
 
-            raise getattr(self._module, item)
+            return getattr(self._module, item)
 
     def zero_grad(self, set_to_none: bool = False):
         """
