@@ -3,10 +3,10 @@ name: CI_CPU
 on:
   push:
     branches:
-      - main
+      - jbr-main
   pull_request:
     branches:
-      - main
+      - jbr-main
   schedule:
     - cron: '4 4 * * *'  # This schedule runs the nightly job every night at 4:04AM
 
