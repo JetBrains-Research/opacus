@@ -40,6 +40,3 @@ class GradSampleModuleNoOp(AbstractGradSampleModule):
             batch_first=batch_first,
             loss_reduction=loss_reduction,
         )
-
-    def forward(self, x: torch.Tensor, *args, **kwargs):
-        return self._module.forward(x, *args, **kwargs)

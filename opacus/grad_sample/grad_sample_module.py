@@ -145,9 +145,6 @@ class GradSampleModule(AbstractGradSampleModule):
             force_functorch=force_functorch,
         )
 
-    def forward(self, *args, **kwargs):
-        return self._module(*args, **kwargs)
-
     def iterate_submodules(self, module: nn.Module) -> Iterable[nn.Module]:
         if has_trainable_params(module):
             yield module

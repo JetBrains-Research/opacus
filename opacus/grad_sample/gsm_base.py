@@ -71,10 +71,6 @@ class AbstractGradSampleModule(nn.Module, ABC):
             p.grad_sample = None
             p._forward_counter = 0
 
-    @abstractmethod
-    def forward(self, *args, **kwargs):
-        pass
-
     @property
     def module(self):
         return self._module
