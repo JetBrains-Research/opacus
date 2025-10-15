@@ -15,7 +15,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Mapping, Any
 
 import torch.nn as nn
 from opacus.utils.module_utils import trainable_parameters
@@ -78,6 +78,20 @@ class AbstractGradSampleModule(nn.Module, ABC):
     @property
     def module(self):
         return self._module
+
+    def load_state_dict(
+        self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False
+    ):
+        # Backward compatibility: accept legacy checkpoints where keys are prefixed with "_module."
+        if any(isinstance(k, str) and k.startswith("_module.") for k in state_dict.keys()):
+            state_dict = {k[len("_module."):]: v for k, v in state_dict.items()}
+        return self._module.load_state_dict(state_dict, strict=strict, assign=assign)
+
+    def state_dict(self, *args, destination=None, prefix="", keep_vars=False):
+        # Be transparent and delegate directly to the wrapped module
+        return self._module.state_dict(
+            *args, destination=destination, prefix=prefix, keep_vars=keep_vars
+        )
 
     def __getattr__(self, item):
         try:
