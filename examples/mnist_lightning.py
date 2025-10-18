@@ -175,7 +175,7 @@ def cli_main():
         },
         description="Training MNIST classifier with Opacus and PyTorch Lightning",
     )
-    cli.trainer.fit(cli.model, datamodule=cli.datamodule)
+    cli.trainer.fit(cli.module, datamodule=cli.datamodule)
     cli.trainer.test(ckpt_path="best", datamodule=cli.datamodule)
 
 

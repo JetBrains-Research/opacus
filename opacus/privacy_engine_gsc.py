@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """
-PrivacyEngineHookBased: A GradSampleModule-less implementation of PrivacyEngine.
+PrivacyEngineGradSampleController: A GradSampleModule-less implementation of PrivacyEngine.
 
 This module provides an alternative approach to the standard PrivacyEngine that
 attaches hooks directly to models without wrapping them in GradSampleModule.
@@ -24,15 +24,15 @@ This improves compatibility with transformers and other complex models.
 import os
 import warnings
 from itertools import chain
-from typing import Any, BinaryIO, Dict, IO, List, Optional, Tuple, Union
+from typing import Any, BinaryIO, Dict, IO, List, Optional, Tuple, Union, Type
 
 import torch
 from opacus.accountants import create_accountant
 from opacus.accountants.utils import get_noise_multiplier
 from opacus.data_loader import DPDataLoader, switch_generator
 from opacus.distributed import DifferentiallyPrivateDistributedDataParallel as DPDDP
-from opacus.grad_sample import GradSampleModule
-from opacus.hook_controller import HookController
+from opacus.grad_sample import GradSampleController
+from opacus.grad_sample.utils import wrap_model_in_controller
 from opacus.optimizers import DPOptimizer, get_optimizer_class
 from opacus.schedulers import _GradClipScheduler, _NoiseScheduler
 from opacus.validators.module_validator import ModuleValidator
@@ -42,40 +42,25 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
 
-class PrivacyEngineHookBased:
+class PrivacyEngineGradSampleController:
     """
+    Main entry point to the Opacus API - use ``PrivacyEngine``  to enable differential
+    privacy for your model training.
+
+    ``PrivacyEngine`` object encapsulates current privacy state (privacy budget +
+    method it's been calculated) and exposes ``make_private`` method to wrap your
+    PyTorch training objects with their private counterparts.
+
     Alternative PrivacyEngine that uses direct hook attachment instead of module wrapping.
 
     This implementation provides the same functionality as PrivacyEngine but attaches
     hooks directly to the model without wrapping it in a GradSampleModule. This approach
     is more compatible with transformers and other models that have complex module
     introspection or custom __getattr__ behavior.
-
-    Can be used as a context manager for automatic cleanup:
-
-    Example:
-        >>> model = MyCustomModel()
-        >>> optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
-        >>> dataloader = demo_dataloader
-        >>>
-        >>> # Standard usage
-        >>> privacy_engine = PrivacyEngineHookBased()
-        >>> model, optimizer, dataloader = privacy_engine.make_private(
-        ...    module=model,
-        ...    optimizer=optimizer,
-        ...    data_loader=dataloader,
-        ...    noise_multiplier=1.0,
-        ...    max_grad_norm=1.0,
-        ... )
-        >>> # ... training ...
-        >>> privacy_engine.cleanup()  # Manual cleanup
-
-        ... # Automatic cleanup on exit
     """
 
     def __init__(self, *, accountant: str = "prv", secure_mode: bool = False):
         """
-        Initialize the PrivacyEngineHookBased.
 
         Args:
             accountant: Accounting mechanism. Currently supported:
@@ -84,14 +69,15 @@ class PrivacyEngineHookBased:
                 - prv (:class`~opacus.accountants.PRVAccountant`)
             secure_mode: Set to ``True`` if cryptographically strong DP guarantee is
                 required. ``secure_mode=True`` uses secure random number generator for
-                noise and shuffling (as opposed to pseudo-rng in vanilla PyTorch).
+                noise and shuffling (as opposed to pseudo-rng in vanilla PyTorch) and
+                prevents certain floating-point arithmetic-based attacks.
+                See :meth:`~opacus.optimizers.optimizer._generate_noise` for details.
                 When set to ``True`` requires ``torchcsprng`` to be installed
         """
         self.accountant = create_accountant(mechanism=accountant)
         self.secure_mode = secure_mode
         self.secure_rng = None
-        self.dataset = None
-
+        self.dataset = None  # only used to detect switching to a different dataset
         if self.secure_mode:
             try:
                 import torchcsprng as csprng
@@ -124,23 +110,6 @@ class PrivacyEngineHookBased:
         grad_sample_mode="hooks",
         **kwargs,
     ) -> DPOptimizer:
-        """
-        Prepare the optimizer for DP training.
-
-        Args:
-            optimizer: The optimizer to wrap
-            noise_multiplier: Noise multiplier for DP
-            max_grad_norm: Maximum gradient norm for clipping
-            expected_batch_size: Expected batch size
-            loss_reduction: "mean" or "sum"
-            distributed: Whether using distributed training
-            clipping: Clipping strategy ("flat", "per_layer", or "adaptive")
-            noise_generator: Random number generator for noise
-            grad_sample_mode: Mode for computing grad samples
-
-        Returns:
-            DPOptimizer wrapping the original optimizer
-        """
         if isinstance(optimizer, DPOptimizer):
             optimizer = optimizer.original_optimizer
 
@@ -176,19 +145,6 @@ class PrivacyEngineHookBased:
         batch_first: bool = True,
         rand_on_empty: bool = False,
     ) -> DataLoader:
-        """
-        Prepare the data loader for DP training.
-
-        Args:
-            data_loader: The data loader to prepare
-            poisson_sampling: Whether to use Poisson sampling
-            distributed: Whether using distributed training
-            batch_first: Whether batch dimension is first
-            rand_on_empty: Whether to return random data on empty batches
-
-        Returns:
-            Prepared data loader
-        """
         if self.dataset is None:
             self.dataset = data_loader.dataset
         elif self.dataset != data_loader.dataset:
@@ -220,36 +176,19 @@ class PrivacyEngineHookBased:
         *,
         batch_first: bool = True,
         loss_reduction: str = "mean",
-        force_functorch: bool = False,
         strict: bool = False,
-    ) -> Tuple[nn.Module, HookController]:
-        """
-        Prepare the model by attaching hooks directly (no wrapping).
+        grad_sample_mode: str = "hooks",
+    ) -> GradSampleController:
 
-        Args:
-            module: The module to prepare
-            batch_first: Whether batch dimension is first
-            loss_reduction: "mean" or "sum"
-            force_functorch: Whether to force functorch for all modules
-            strict: If True, validate that module has no buffers
-
-        Returns:
-            Tuple of (module, hook_controller)
-        """
-        # Validate the module (will be done again in HookController if strict=True)
-        self.validate(module=module, optimizer=None, data_loader=None)
-
-        # Create hook controller and attach hooks
-        # HookController will automatically get GRAD_SAMPLERS from GradSampleModule
-        hook_controller = HookController(
+        controller = wrap_model_in_controller(
             module,
+            grad_sample_mode=grad_sample_mode,
             batch_first=batch_first,
             loss_reduction=loss_reduction,
-            force_functorch=force_functorch,
             strict=strict,
         )
 
-        return module, hook_controller
+        return controller
 
     def is_compatible(
         self,
@@ -280,6 +219,7 @@ class PrivacyEngineHookBased:
     ):
         """
         Validate that task components are compatible with DP.
+        Same as ``is_compatible()``, but raises error instead of returning bool.
 
         Args:
             module: module to be checked
@@ -295,7 +235,8 @@ class PrivacyEngineHookBased:
     @classmethod
     def get_compatible_module(cls, module: nn.Module) -> nn.Module:
         """
-        Return a privacy engine compatible module.
+        Return a privacy engine compatible module. Also validates the module after
+        running registered fixes.
 
         Args:
             module: module to be modified
@@ -303,6 +244,8 @@ class PrivacyEngineHookBased:
         Returns:
             Module with some submodules replaced for their deep copies or
             close equivalents.
+            See :class:`~opacus.validators.module_validator.ModuleValidator` for
+            more details
         """
         module = ModuleValidator.fix(module)
         ModuleValidator.validate(module, strict=True)
@@ -322,45 +265,92 @@ class PrivacyEngineHookBased:
         clipping: str = "flat",
         noise_generator=None,
         grad_sample_mode: str = "hooks",
+        strict: bool = True,
         rand_on_empty: bool = False,
-        force_functorch: bool = False,
-        return_hook_controller: bool = False,
+        return_controller: bool = False,
         **kwargs,
-    ) -> Union[Tuple[nn.Module, DPOptimizer, DataLoader], Tuple[HookController, DPOptimizer, DataLoader]]:
+    ) -> Union[
+        Tuple[nn.Module, DPOptimizer, DataLoader],
+        Tuple[GradSampleController, DPOptimizer, DataLoader],
+    ]:
         """
-        Add privacy-related responsibilities to the main PyTorch training objects.
+        Add privacy-related responsibilities to the main PyTorch training objects:
+        model, optimizer, and the data loader.
+
+      All of the returned objects act just like their non-private counterparts
+        passed as arguments, but with added DP tasks.
+
+        - Model is wrapped to also compute per sample gradients.
+        - Optimizer is now responsible for gradient clipping and adding noise to the gradients.
+        - Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
+        - DataLoader is updated to perform Poisson sampling.
+
+        Notes:
+            Using any other models, optimizers, or data sources during training
+            will invalidate stated privacy guarantees.
+
 
         Unlike the standard PrivacyEngine, this method does NOT wrap the model in a
         GradSampleModule. Instead, it attaches hooks directly to the model and manages
-        them through a HookController.
+        them through a GradSampleController.
 
         Args:
-            module: PyTorch module to be used for training
+           module: PyTorch module to be used for training
             optimizer: Optimizer to be used for training
             data_loader: DataLoader to be used for training
-            noise_multiplier: The ratio of the standard deviation of the Gaussian noise
-            max_grad_norm: The maximum norm of the per-sample gradients
-            batch_first: Flag to indicate if the input tensor has batch dimension first
-            loss_reduction: Indicates if the loss reduction is a sum or a mean operation
-            poisson_sampling: ``True`` if you want to use standard sampling required for DP
-            clipping: Per sample gradient clipping mechanism
-            noise_generator: torch.Generator() object used as a source of randomness
-            grad_sample_mode: mode for computing per sample gradients
-            rand_on_empty: Return random batch when encountering empty batches
-            force_functorch: Force use of functorch for all modules
-            return_hook_controller: If True, return hook_controller instead of module.
-                This allows manual cleanup via hook_controller.cleanup().
-                The module can be accessed via hook_controller.target_module if needed.
+            noise_multiplier: The ratio of the standard deviation of the Gaussian noise to
+                the L2-sensitivity of the function to which the noise is added
+                (How much noise to add)
+            max_grad_norm: The maximum norm of the per-sample gradients. Any gradient with norm
+                higher than this will be clipped to this value.
+            batch_first: Flag to indicate if the input tensor to the corresponding module
+                has the first dimension representing the batch. If set to True, dimensions on
+                input tensor are expected be ``[batch_size, ...]``, otherwise
+                ``[K, batch_size, ...]``
+            loss_reduction: Indicates if the loss reduction (for aggregating the gradients)
+                is a sum or a mean operation. Can take values "sum" or "mean"
+            poisson_sampling: ``True`` if you want to use standard sampling required
+                for DP guarantees. Setting ``False`` will leave provided data_loader
+                unchanged. Technically this doesn't fit the assumptions made by
+                privacy accounting mechanism, but it can be a good approximation when
+                using Poisson sampling is unfeasible.
+            clipping: Per sample gradient clipping mechanism ("flat" or "per_layer" or "adaptive").
+                Flat clipping calculates the norm of the entire gradient over
+                all parameters, per layer clipping sets individual norms for
+                every parameter tensor, and adaptive clipping updates clipping bound per iteration.
+                Flat clipping is usually preferred, but using per layer clipping in combination
+                with distributed training can provide notable performance gains.
+            noise_generator: torch.Generator() object used as a source of randomness for
+                the noise
+            grad_sample_mode: mode for computing per sample gradients. Determines the
+                implementation class for the wrapped ``module``. See
+                :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
+                details
+            strict: If True, will raise an error if the module is incompatible with
+                grad_sample_mode and will not attach hooks.
+            rand_on_empty: Indicates to return a batch containing random numbers when encountering
+                empty batches samples with Poisson sampling rather than tensors with zero-length batch dimensions
+            return_controller: If True, return controller instead of module.
+                This allows manual cleanup via controller.cleanup().
+                The module can be accessed via controller.target_module if needed.
 
         Returns:
-            If return_hook_controller=False (default): Tuple of (model, optimizer, data_loader).
-            If return_hook_controller=True: Tuple of (hook_controller, optimizer, data_loader).
+            If return_gs_controller=False (default): Tuple of (model, optimizer, data_loader).
+            If return_gs_controller=True: Tuple of (controller, optimizer, data_loader).
             Note: Model is NOT wrapped - it's the original module with hooks attached.
+
+            Optimizer is a wrapper around the original optimizer that also does
+             gradient clipping and noise addition to the gradients
+            Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
+                Only returned when grad_sample_mode is "ghost".
+            DataLoader is a brand new DataLoader object, constructed to behave as
+                equivalent to the original data loader, possibly with updated
+                sampling mechanism. Points to the same dataset object.
         """
         if noise_generator and self.secure_mode:
             raise ValueError("Passing seed is prohibited in secure mode")
 
-        # Validate that optimizer parameters match module parameters
+        # compare module parameter with optimizer parameters
         model_parameters = set(module.parameters())
         for p in chain.from_iterable(
             [param_group["params"] for param_group in optimizer.param_groups]
@@ -373,16 +363,15 @@ class PrivacyEngineHookBased:
         distributed = isinstance(module, (DPDDP, DDP, FSDPModule))
 
         # Prepare model (attach hooks directly, no wrapping)
-        module, hook_controller = self._prepare_model(
+        controller = self._prepare_model(
             module,
             batch_first=batch_first,
             loss_reduction=loss_reduction,
-            force_functorch=force_functorch,
-            strict=kwargs.get("strict", False),
+            grad_sample_mode=grad_sample_mode,
+            strict=strict,
         )
-
         if poisson_sampling:
-            hook_controller.forbid_grad_accumulation()
+            controller.forbid_grad_accumulation()
 
         data_loader = self._prepare_data_loader(
             data_loader,
@@ -395,6 +384,7 @@ class PrivacyEngineHookBased:
         sample_rate = 1 / len(data_loader)
         expected_batch_size = int(len(data_loader.dataset) * sample_rate)
 
+        # expected_batch_size is the *per worker* batch size
         if distributed:
             world_size = torch.distributed.get_world_size()
             expected_batch_size /= world_size
@@ -416,8 +406,8 @@ class PrivacyEngineHookBased:
             self.accountant.get_optimizer_hook_fn(sample_rate=sample_rate)
         )
 
-        if return_hook_controller:
-            return hook_controller, optimizer, data_loader
+        if return_controller:
+            return controller, optimizer, data_loader
         else:
             return module, optimizer, data_loader
 
@@ -437,33 +427,76 @@ class PrivacyEngineHookBased:
         clipping: str = "flat",
         noise_generator=None,
         grad_sample_mode: str = "hooks",
-        force_functorch: bool = False,
-        return_hook_controller: bool = False,
+        strict: bool = True,
+        rand_on_empty: bool = False,
+        return_controller: bool = False,
         **kwargs,
-    ) -> Union[Tuple[nn.Module, DPOptimizer, DataLoader], Tuple[HookController, DPOptimizer, DataLoader]]:
+    ) -> Union[
+        Tuple[nn.Module, DPOptimizer, DataLoader],
+        Tuple[GradSampleController, DPOptimizer, DataLoader],
+    ]:
         """
-        Version of make_private that calculates privacy parameters based on a given privacy budget.
+        Version of :meth:`~opacus.privacy_engine_gsc.PrivacyEngine.make_private`,
+        that calculates privacy parameters based on a given privacy budget.
+
+        For the full documentation see
+        :meth:`~opacus.privacy_engine_gsc.PrivacyEngine.make_private`
 
         Args:
             module: PyTorch module to be used for training
             optimizer: Optimizer to be used for training
             data_loader: DataLoader to be used for training
-            target_epsilon: Target epsilon to be achieved
-            target_delta: Target delta to be achieved
-            epochs: Number of training epochs
-            max_grad_norm: The maximum norm of the per-sample gradients
-            batch_first: Flag to indicate if the input tensor has batch dimension first
-            loss_reduction: Indicates if the loss reduction is a sum or a mean operation
-            poisson_sampling: ``True`` if you want to use standard sampling required for DP
-            clipping: Per sample gradient clipping mechanism
-            noise_generator: torch.Generator() object used as a source of randomness
-            grad_sample_mode: mode for computing per sample gradients
-            force_functorch: Force use of functorch for all modules
-            return_hook_controller: If True, return hook_controller instead of module
+            target_epsilon: Target epsilon to be achieved, a metric of privacy loss at differential changes in data.
+            target_delta: Target delta to be achieved. Probability of information being leaked.
+            epochs: Number of training epochs you intend to perform; noise_multiplier relies on this to calculate
+                an appropriate sigma to ensure privacy budget of (target_epsilon, target_delta) at the end
+                of epochs.
+            max_grad_norm: The maximum norm of the per-sample gradients. Any gradient with norm
+                higher than this will be clipped to this value.
+            batch_first: Flag to indicate if the input tensor to the corresponding module
+                has the first dimension representing the batch. If set to True, dimensions on
+                input tensor are expected be ``[batch_size, ...]``, otherwise
+                ``[K, batch_size, ...]``
+            loss_reduction: Indicates if the loss reduction (for aggregating the gradients)
+                is a sum or a mean operation. Can take values "sum" or "mean"
+            poisson_sampling: ``True`` if you want to use standard sampling required
+                for DP guarantees. Setting ``False`` will leave provided data_loader
+                unchanged. Technically this doesn't fit the assumptions made by
+                privacy accounting mechanism, but it can be a good approximation when
+                using Poisson sampling is unfeasible.
+            clipping: Per sample gradient clipping mechanism ("flat" or "per_layer" or "adaptive").
+                Flat clipping calculates the norm of the entire gradient over
+                all parameters, per layer clipping sets individual norms for
+                every parameter tensor, and adaptive clipping updates clipping bound per iteration.
+                Flat clipping is usually preferred, but using per layer clipping in combination
+                with distributed training can provide notable performance gains.
+            noise_generator: torch.Generator() object used as a source of randomness for
+                the noise
+            grad_sample_mode: mode for computing per sample gradients. Determines the
+                implementation class for the wrapped ``module``. See
+                :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
+                details
+            strict: If True, will raise an error if the module is incompatible with
+                grad_sample_mode and will not attach hooks.
+            rand_on_empty: Indicates to return a batch containing random numbers when encountering
+                empty batches samples with Poisson sampling rather than tensors with zero-length batch dimensions
+            return_controller: If True, return controller instead of module.
+                This allows manual cleanup via controller.cleanup().
+                The module can be accessed via controller.target_module if needed.
+
 
         Returns:
-            If return_hook_controller=False (default): Tuple of (model, optimizer, data_loader).
-            If return_hook_controller=True: Tuple of (hook_controller, optimizer, data_loader).
+            If return_gs_controller=False (default): Tuple of (model, optimizer, data_loader).
+            If return_gs_controller=True: Tuple of (controller, optimizer, data_loader).
+            Note: Model is NOT wrapped - it's the original module with hooks attached.
+
+            Optimizer is a wrapper around the original optimizer that also does
+                gradient clipping and noise addition to the gradients
+            Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
+                Only returned when grad_sample_mode is "ghost".
+            DataLoader is a brand new DataLoader object, constructed to behave as
+                equivalent to the original data loader, possibly with updated
+                sampling mechanism. Points to the same dataset object.
         """
         sample_rate = 1 / len(data_loader)
 
@@ -493,8 +526,9 @@ class PrivacyEngineHookBased:
             grad_sample_mode=grad_sample_mode,
             poisson_sampling=poisson_sampling,
             clipping=clipping,
-            force_functorch=force_functorch,
-            return_hook_controller=return_hook_controller,
+            strict=strict,
+            rand_on_empty=rand_on_empty,
+            return_controller=return_controller,
             **kwargs,
         )
 
@@ -524,9 +558,6 @@ class PrivacyEngineHookBased:
     ):
         """
         Saves the state_dict of module, optimizer, and accountant at path.
-
-        Note: Since the model is not wrapped, state_dict is directly from the module.
-
         Args:
             path: Path to save the state dict objects.
             module: Module to save (not wrapped)
@@ -589,6 +620,7 @@ class PrivacyEngineHookBased:
         if optimizer is not None and len(optimizer_state_dict) > 0:
             optimizer.load_state_dict(optimizer_state_dict)
         elif (optimizer is not None) ^ (len(optimizer_state_dict) > 0):
+            # warn if only one of them is available
             warnings.warn(
                 f"optimizer_state_dict has {len(optimizer_state_dict)} items"
                 f" but optimizer is {'' if optimizer else 'not'} provided."

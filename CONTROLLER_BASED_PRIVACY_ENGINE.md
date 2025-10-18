@@ -1,8 +1,8 @@
-# Hook-Based Privacy Engine
+# GradSampleController-Based Privacy Engine
 
 ## Overview
 
-`PrivacyEngineHookBased` is an alternative implementation of Opacus's privacy engine that attaches hooks directly to model modules **without wrapping them** in a `GradSampleModule`. This approach provides better compatibility with transformer models and other architectures that have complex module introspection or custom attribute access patterns.
+`PrivacyEngineGradSampleController` is an alternative implementation of Opacus's privacy engine that attaches hooks directly to model modules **without wrapping them** in a `GradSampleModule`. This approach provides better compatibility with transformer models and other architectures that have complex module introspection or custom attribute access patterns.
 
 ## Motivation
 
@@ -27,12 +27,12 @@ model.encoder  # Works via __getattr__ forwarding, but can be fragile
 model.state_dict()  # May have "_module." prefixes
 ```
 
-### Hook-Based Approach
+### GradSampleController-Based Approach
 
 ```python
-# PrivacyEngineHookBased does NOT wrap the model
+# PrivacyEngineGradSampleController does NOT wrap the model
 model = BertModel(...)
-privacy_engine = PrivacyEngineHookBased()
+privacy_engine = PrivacyEngineGradSampleController()
 model, optimizer, dataloader = privacy_engine.make_private(...)
 
 # Benefits:
@@ -45,15 +45,15 @@ model.state_dict()  # Clean keys, no prefixes
 
 ### Components
 
-1. **HookController** (`opacus/hook_controller.py`)
+1. **GradSampleController** (`opacus/grad_sample/grad_sample_controller.py`)
    - Manages the lifecycle of forward and backward hooks
    - Attaches hooks directly to model submodules
    - Computes per-sample gradients via hooks
    - Stores state separately from the model
 
-2. **PrivacyEngineHookBased** (`opacus/privacy_engine_hook_based.py`)
+2. **PrivacyEngineGradSampleController** (`opacus/privacy_engine_gsc.py`)
    - Drop-in replacement for `PrivacyEngine`
-   - Creates and manages `HookController`
+   - Creates and manages `GradSampleController`
    - Same API as standard `PrivacyEngine`
    - Returns unwrapped models
 
@@ -66,15 +66,15 @@ Instead of wrapping the model in a GradSampleModule:
 wrapped_model = GradSampleModule(model)
 ```
 
-The hook-based approach attaches hooks directly:
+The controller-based approach attaches hooks directly:
 
 ```python
-# Hook-based approach (no wrapping)
-hook_controller = HookController(model)
+# Controller-based approach (no wrapping)
+grad_sample_controller = GradSampleController(model)
 # model remains unchanged, hooks are attached
 ```
 
-The `HookController`:
+The `GradSampleController`:
 - Iterates over model submodules
 - Registers `forward_hook` and `full_backward_hook` on each submodule
 - Captures activations in forward pass
@@ -87,7 +87,7 @@ The `HookController`:
 
 ```python
 import torch
-from opacus.privacy_engine_hook_based import PrivacyEngineHookBased
+from opacus.privacy_engine_gsc import PrivacyEngineGradSampleController
 
 # Create your model
 model = MyTransformerModel()
@@ -95,7 +95,7 @@ optimizer = torch.optim.Adam(model.parameters())
 dataloader = ...
 
 # Initialize hook-based privacy engine
-privacy_engine = PrivacyEngineHookBased()
+privacy_engine = PrivacyEngineGradSampleController()
 
 # Make private (model is NOT wrapped!)
 model, optimizer, dataloader = privacy_engine.make_private(
@@ -121,7 +121,7 @@ privacy_engine.cleanup()
 ### With Epsilon Budget
 
 ```python
-privacy_engine = PrivacyEngineHookBased()
+privacy_engine = PrivacyEngineGradSampleController()
 
 model, optimizer, dataloader = privacy_engine.make_private_with_epsilon(
     module=model,
@@ -156,7 +156,7 @@ Note: State dicts are clean (no `_module.` prefixes) because the model is not wr
 
 ## API Reference
 
-### PrivacyEngineHookBased
+### PrivacyEngineGradSampleController
 
 #### `__init__(accountant="prv", secure_mode=False)`
 
@@ -191,7 +191,7 @@ Make a model, optimizer, and dataloader private.
 
 Remove all hooks and attributes from the model. Call this when done with DP training.
 
-### HookController
+### GradSampleController
 
 #### `__init__(model, batch_first=True, loss_reduction="mean", ...)`
 
@@ -214,7 +214,7 @@ Remove hooks and clean up parameter attributes.
 
 ## Comparison with Standard PrivacyEngine
 
-| Feature | PrivacyEngine | PrivacyEngineHookBased |
+| Feature | PrivacyEngine | PrivacyEngineGradSampleController |
 |---------|--------------|------------------------|
 | Model wrapping | Yes (GradSampleModule) | No |
 | Type preservation | No | Yes |
@@ -249,11 +249,13 @@ Minimal changes needed:
 ```python
 # Before
 from opacus import PrivacyEngine
+
 privacy_engine = PrivacyEngine()
 
 # After
-from opacus.privacy_engine_hook_based import PrivacyEngineHookBased
-privacy_engine = PrivacyEngineHookBased()
+from opacus.privacy_engine_gsc import PrivacyEngineGradSampleController
+
+privacy_engine = PrivacyEngineGradSampleController()
 
 # Rest of the code remains the same!
 model, optimizer, dataloader = privacy_engine.make_private(...)
@@ -261,7 +263,7 @@ model, optimizer, dataloader = privacy_engine.make_private(...)
 
 ### Additional Cleanup Step
 
-With hook-based approach, remember to cleanup:
+With controller-based approach, remember to cleanup:
 
 ```python
 # At the end of training
@@ -276,20 +278,20 @@ privacy_engine.cleanup()  # Removes hooks and attributes
 
 ## Examples
 
-See `examples/hook_based_example.py` for a complete example with a transformer model.
+See `examples/gsc_example.py` for a complete example with a transformer model.
 
 ## Testing
 
 Run tests with:
 
 ```bash
-python -m pytest opacus/tests/privacy_engine_hook_based_test.py -v
+python -m pytest opacus/tests/privacy_engine_gsc_test.py -v
 ```
 
 Or run the example:
 
 ```bash
-python examples/hook_based_example.py
+python examples/gsc_example.py
 ```
 
 ## Implementation Details
@@ -304,7 +306,7 @@ The hook controller adds these attributes to parameters:
 
 ### Hook Lifecycle
 
-1. **Initialization**: `HookController` registers hooks on all trainable submodules
+1. **Initialization**: `GradSampleController` registers hooks on all trainable submodules
 2. **Forward pass**: `capture_activations_hook` stores input activations
 3. **Backward pass**: `capture_backprops_hook` computes per-sample gradients
 4. **Optimizer step**: DPOptimizer clips and adds noise using `grad_sample`
@@ -312,7 +314,7 @@ The hook controller adds these attributes to parameters:
 
 ### Thread Safety
 
-The hook-based approach is compatible with PyTorch's autograd threading model. However, be aware that hooks are called in the order they were registered, which may matter for certain advanced use cases.
+The controller-based approach is compatible with PyTorch's autograd threading model. However, be aware that hooks are called in the order they were registered, which may matter for certain advanced use cases.
 
 ## Future Work
 
@@ -324,7 +326,7 @@ The hook-based approach is compatible with PyTorch's autograd threading model. H
 ## Contributing
 
 Contributions are welcome! Please ensure:
-1. Tests pass for both standard and hook-based engines
+1. Tests pass for both standard and GradSampleController-based engines
 2. Documentation is updated
 3. Examples demonstrate new features
 

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from opacus.optimizers.adaclipoptimizer import AdaClipDPOptimizer
 from opacus.privacy_engine import PrivacyEngine
-from opacus.privacy_engine_hook_based import PrivacyEngineHookBased
+from opacus.privacy_engine_gsc import PrivacyEngineGradSampleController
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -39,31 +39,31 @@ class BaseAdaClipTest:
         )
 
     def tearDown(self):
-        """Clean up hooks if needed."""
-        if hasattr(self, 'hook_controller') and self.hook_controller is not None:
-            self.hook_controller.cleanup()
+        """Clean up controller if needed."""
+        if hasattr(self, 'controller') and self.controller is not None:
+            self.controller.cleanup()
 
     def _make_private(self, model, optimizer, **kwargs):
         """
         Wrapper to handle both PrivacyEngine types.
 
-        Returns: (model, optimizer, dataloader, hook_controller_or_none)
+        Returns: (model, optimizer, dataloader, controller_or_none)
         """
         privacy_engine = self.ENGINE_CLASS()
 
-        # Check if this is hook-based engine
-        is_hook_based = isinstance(privacy_engine, PrivacyEngineHookBased)
+        # Check if this is controller-based engine
+        is_controller_based = isinstance(privacy_engine, PrivacyEngineGradSampleController)
 
-        if is_hook_based:
-            # Hook-based engine with return_hook_controller=True
-            hook_controller, optimizer, dataloader = privacy_engine.make_private(
+        if is_controller_based:
+            # Controller-based engine with return_controller=True
+            controller, optimizer, dataloader = privacy_engine.make_private(
                 module=model,
                 optimizer=optimizer,
                 data_loader=self.dataloader,
-                return_hook_controller=True,
+                return_controller=True,
                 **kwargs
             )
-            return model, optimizer, dataloader, hook_controller
+            return model, optimizer, dataloader, controller
         else:
             # Standard engine
             model, optimizer, dataloader = privacy_engine.make_private(
@@ -82,7 +82,7 @@ class BaseAdaClipTest:
         # Make private with AdaClip optimizer
         # Note: noise_multiplier must be < 2 * unclipped_num_std (AdaClip constraint)
         unclipped_num_std = 1.0
-        model, optimizer, dataloader, self.hook_controller = self._make_private(
+        model, optimizer, dataloader, self.controller = self._make_private(
             model=model,
             optimizer=optimizer,
             noise_multiplier=0.5,  # < 2 * unclipped_num_std (1.0)
@@ -112,7 +112,7 @@ class BaseAdaClipTest:
         model = SimpleNet()
         optimizer = torch.optim.SGD(model.parameters(), lr=self.LR)
 
-        model, optimizer, dataloader, self.hook_controller = self._make_private(
+        model, optimizer, dataloader, self.controller = self._make_private(
             model=model,
             optimizer=optimizer,
             noise_multiplier=0.0,  # No noise for clearer results
@@ -162,7 +162,7 @@ class BaseAdaClipTest:
         optimizer = torch.optim.SGD(model.parameters(), lr=self.LR)
 
         unclipped_num_std = 1.0
-        model, optimizer, dataloader, self.hook_controller = self._make_private(
+        model, optimizer, dataloader, self.controller = self._make_private(
             model=model,
             optimizer=optimizer,
             noise_multiplier=0.8,  # < 2 * unclipped_num_std (0.8 < 1.0)
@@ -225,7 +225,7 @@ class BaseAdaClipTest:
 
         target_quantile = 0.7
         unclipped_num_std = 0.5
-        model, optimizer, dataloader, self.hook_controller = self._make_private(
+        model, optimizer, dataloader, self.controller = self._make_private(
             model=model,
             optimizer=optimizer,
             noise_multiplier=0.8,  # < 2 * unclipped_num_std (0.8 < 1.0)
@@ -275,7 +275,7 @@ class BaseAdaClipTest:
         model1 = SimpleNet()
         optimizer1 = torch.optim.SGD(model1.parameters(), lr=self.LR)
 
-        model1, optimizer1, dataloader1, hook_controller1 = self._make_private(
+        model1, optimizer1, dataloader1, controller1 = self._make_private(
             model=model1,
             optimizer=optimizer1,
             noise_multiplier=0.0,
@@ -300,7 +300,7 @@ class BaseAdaClipTest:
         model2.load_state_dict(state_dict1)
         optimizer2 = torch.optim.SGD(model2.parameters(), lr=self.LR)
 
-        model2, optimizer2, dataloader2, hook_controller2 = self._make_private(
+        model2, optimizer2, dataloader2, controller2 = self._make_private(
             model=model2,
             optimizer=optimizer2,
             noise_multiplier=0.0,
@@ -343,13 +343,13 @@ class BaseAdaClipTest:
             "AdaClip and fixed clipping should produce different results"
         )
 
-        # Cleanup both hook controllers if they exist
-        if hook_controller1:
-            hook_controller1.cleanup()
-        if hook_controller2:
-            hook_controller2.cleanup()
+        # Cleanup both controllers if they exist
+        if controller1:
+            controller1.cleanup()
+        if controller2:
+            controller2.cleanup()
         # Mark as cleaned up so tearDown doesn't try again
-        self.hook_controller = None
+        self.controller = None
 
     def test_adaclip_parameter_validation(self):
         """Test that AdaClip validates parameters correctly."""
@@ -377,7 +377,7 @@ class BaseAdaClipTest:
         optimizer = torch.optim.SGD(model.parameters(), lr=self.LR)
 
         unclipped_num_std = 0.5
-        model, optimizer, dataloader, self.hook_controller = self._make_private(
+        model, optimizer, dataloader, self.controller = self._make_private(
             model=model,
             optimizer=optimizer,
             noise_multiplier=0.8,  # With noise, < 2 * unclipped_num_std
@@ -411,9 +411,9 @@ class AdaClipStandardEngineTest(BaseAdaClipTest, unittest.TestCase):
     ENGINE_CLASS = PrivacyEngine
 
 
-class AdaClipHookBasedEngineTest(BaseAdaClipTest, unittest.TestCase):
-    """Test AdaClipDPOptimizer with hook-based PrivacyEngine."""
-    ENGINE_CLASS = PrivacyEngineHookBased
+class AdaClipGradSampleControllerEngineTest(BaseAdaClipTest, unittest.TestCase):
+    """Test AdaClipDPOptimizer with GradSampleController-based PrivacyEngine."""
+    ENGINE_CLASS = PrivacyEngineGradSampleController
 
 
 if __name__ == "__main__":

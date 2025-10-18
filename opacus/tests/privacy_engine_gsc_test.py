@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Comprehensive tests for PrivacyEngineHookBased.
+Comprehensive tests for PrivacyEngineGradSampleController.
 
 This test suite mirrors the comprehensive tests in privacy_engine_test.py
-but specifically for the hook-based implementation. Tests are reproduced
-independently to validate that hook-based approach provides identical
+but specifically for the controller-based implementation. Tests are reproduced
+independently to validate that the controller-based approach provides identical
 functionality to the standard wrapped approach.
 """
 
@@ -38,7 +38,7 @@ from torchvision import models
 
 from opacus.layers.dp_multihead_attention import DPMultiheadAttention
 from opacus.optimizers.optimizer import _generate_noise
-from opacus.privacy_engine_hook_based import PrivacyEngineHookBased
+from opacus.privacy_engine_gsc import PrivacyEngineGradSampleController
 from opacus.schedulers import StepGradClip, StepNoise
 from opacus.utils.module_utils import are_state_dict_equal
 from opacus.validators.errors import UnsupportedModuleError
@@ -59,7 +59,7 @@ class SimpleNet(nn.Module):
         return x
 
 
-class PrivacyEngineHookBasedTest(unittest.TestCase):
+class PrivacyEngineGradSampleControllerTest(unittest.TestCase):
     def setUp(self):
         self.model = SimpleNet()
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.1)
@@ -71,14 +71,14 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
         self.dataloader = DataLoader(dataset, batch_size=10)
 
     def test_initialization(self):
-        """Test that PrivacyEngineHookBased can be initialized."""
-        privacy_engine = PrivacyEngineHookBased()
+        """Test that PrivacyEngineGradSampleController can be initialized."""
+        privacy_engine = PrivacyEngineGradSampleController()
         self.assertIsNotNone(privacy_engine)
         self.assertIsNotNone(privacy_engine.accountant)
 
     def test_make_private_returns_unwrapped_model(self):
         """Test that make_private returns the original model, not a wrapper."""
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
 
         original_model = self.model
         model, optimizer, dataloader = privacy_engine.make_private(
@@ -96,25 +96,25 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
 
     def test_hooks_are_attached(self):
         """Test that hooks are properly attached to the model."""
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
 
-        hook_controller, optimizer, dataloader = privacy_engine.make_private(
+        controller, optimizer, dataloader = privacy_engine.make_private(
             module=self.model,
             optimizer=self.optimizer,
             data_loader=self.dataloader,
             noise_multiplier=1.0,
             max_grad_norm=1.0,
-            return_hook_controller=True,
+            return_controller=True,
         )
 
         # Check that hook controller was created
-        self.assertIsNotNone(hook_controller)
-        self.assertTrue(len(hook_controller.hook_handles) > 0)
-        hook_controller.cleanup()
+        self.assertIsNotNone(controller)
+        self.assertTrue(len(controller.autograd_grad_sample_hooks) > 0)
+        controller.cleanup()
 
     def test_grad_sample_computation(self):
         """Test that per-sample gradients are computed correctly."""
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
 
         model, optimizer, dataloader = privacy_engine.make_private(
             module=self.model,
@@ -144,8 +144,8 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
                 self.assertEqual(param.grad_sample.shape[0], data.shape[0])
 
     def test_optimizer_step(self):
-        """Test that optimizer step works with hook-based approach."""
-        privacy_engine = PrivacyEngineHookBased()
+        """Test that optimizer step works with controller-based approach."""
+        privacy_engine = PrivacyEngineGradSampleController()
 
         model, optimizer, dataloader = privacy_engine.make_private(
             module=self.model,
@@ -178,19 +178,19 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
 
     def test_cleanup(self):
         """Test that cleanup removes hooks and attributes."""
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
 
-        hook_controller, optimizer, dataloader = privacy_engine.make_private(
+        controller, optimizer, dataloader = privacy_engine.make_private(
             module=self.model,
             optimizer=self.optimizer,
             data_loader=self.dataloader,
             noise_multiplier=1.0,
             max_grad_norm=1.0,
-            return_hook_controller=True,
+            return_controller=True,
         )
 
         # Cleanup
-        hook_controller.cleanup()
+        controller.cleanup()
 
         # Parameters should not have grad_sample attribute
         for param in self.model.parameters():
@@ -198,7 +198,7 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
 
     def test_state_dict_unchanged(self):
         """Test that state_dict remains unchanged (no wrapper prefix)."""
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
 
         # Get state dict before making private
         state_dict_before = self.model.state_dict()
@@ -225,7 +225,7 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
 
     def test_model_attribute_access(self):
         """Test that model attributes can be accessed directly."""
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
 
         model, optimizer, dataloader = privacy_engine.make_private(
             module=self.model,
@@ -246,7 +246,7 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
         """Test that checkpoints can be saved and loaded."""
         import tempfile
 
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
 
         model, optimizer, dataloader = privacy_engine.make_private(
             module=self.model,
@@ -274,7 +274,7 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
             )
 
         # Create new engine and model
-        new_privacy_engine = PrivacyEngineHookBased()
+        new_privacy_engine = PrivacyEngineGradSampleController()
         new_model = SimpleNet()
         new_optimizer = torch.optim.SGD(new_model.parameters(), lr=0.1)
 
@@ -299,6 +299,7 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
 
         # Clean up
         import os
+
         os.unlink(checkpoint_path)
 
     def test_manual_cleanup(self):
@@ -306,18 +307,18 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
         model = SimpleNet()
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 
-        privacy_engine = PrivacyEngineHookBased()
-        hook_controller, optimizer, dataloader = privacy_engine.make_private(
+        privacy_engine = PrivacyEngineGradSampleController()
+        controller, optimizer, dataloader = privacy_engine.make_private(
             module=model,
             optimizer=optimizer,
             data_loader=self.dataloader,
             noise_multiplier=1.0,
             max_grad_norm=1.0,
-            return_hook_controller=True,
+            return_controller=True,
         )
 
         # Hook controller should exist
-        self.assertIsNotNone(hook_controller)
+        self.assertIsNotNone(controller)
 
         # Train one step
         data, target = next(iter(dataloader))
@@ -328,7 +329,7 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
         optimizer.step()
 
         # Cleanup
-        hook_controller.cleanup()
+        controller.cleanup()
 
         # Parameters should not have grad_sample
         for param in model.parameters():
@@ -339,24 +340,24 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
         model = SimpleNet()
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 
-        privacy_engine = PrivacyEngineHookBased()
-        hook_controller, optimizer, dataloader = privacy_engine.make_private(
+        privacy_engine = PrivacyEngineGradSampleController()
+        controller, optimizer, dataloader = privacy_engine.make_private(
             module=model,
             optimizer=optimizer,
             data_loader=self.dataloader,
             noise_multiplier=1.0,
             max_grad_norm=1.0,
-            return_hook_controller=True,
+            return_controller=True,
         )
 
         # Hook controller should exist
-        self.assertIsNotNone(hook_controller)
+        self.assertIsNotNone(controller)
 
         # Even if an exception occurs, cleanup should still be possible
         try:
             raise ValueError("Test exception")
         except ValueError:
-            hook_controller.cleanup()  # Manual cleanup still works
+            controller.cleanup()  # Manual cleanup still works
 
     def test_ddp_model_handling(self):
         """Test that DDP-wrapped models are properly handled."""
@@ -364,7 +365,7 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
 
         # Note: We use a mock DDP that doesn't inherit from actual DDP
         # In this case, the model is treated as a regular module (not unwrapped)
-        # Real DDP instances would be unwrapped by HookController
+        # Real DDP instances would be unwrapped by GradSampleController
         class MockDDP(nn.Module):
             def __init__(self, module):
                 super().__init__()
@@ -379,25 +380,25 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
         ddp_model = MockDDP(model)
         optimizer = torch.optim.SGD(ddp_model.parameters(), lr=0.1)
 
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
 
         # Make private with DDP model
-        hook_controller, optimizer, dataloader = privacy_engine.make_private(
+        controller, optimizer, dataloader = privacy_engine.make_private(
             module=ddp_model,
             optimizer=optimizer,
             data_loader=self.dataloader,
             noise_multiplier=1.0,
             max_grad_norm=1.0,
             poisson_sampling=False,
-            return_hook_controller=True,
+            return_controller=True,
         )
 
         # Hook controller should exist
         # Since MockDDP is not a real DDP, target_module will be the MockDDP itself
-        self.assertIsNotNone(hook_controller)
+        self.assertIsNotNone(controller)
         # For real DDP instances, this would be unwrapped to model
         # But MockDDP is treated as a regular module
-        self.assertIs(hook_controller.target_module, ddp_model)
+        self.assertIs(controller.module, ddp_model)
 
         # Should be able to train
         data, target = next(iter(dataloader))
@@ -411,7 +412,7 @@ class PrivacyEngineHookBasedTest(unittest.TestCase):
             if param.requires_grad:
                 self.assertIsNotNone(param.grad_sample)
 
-        hook_controller.cleanup()
+        controller.cleanup()
 
 
 def get_grad_sample_aggregated(tensor: torch.Tensor, loss_type: str = "mean"):
@@ -432,11 +433,11 @@ def get_grad_sample_aggregated(tensor: torch.Tensor, loss_type: str = "mean"):
     return grad_sample_aggregated
 
 
-class BaseHookBasedPrivacyEngineTest:
+class BasePrivacyEngineGradSampleControllerTest:
     """
-    Base class for hook-based privacy engine tests.
+    Base class for controller-based privacy engine tests.
 
-    Similar to BasePrivacyEngineTest but specifically for PrivacyEngineHookBased.
+    Similar to BasePrivacyEngineTest but specifically for PrivacyEngineGradSampleController.
     Subclasses should implement _init_model() and _init_data().
     """
 
@@ -452,9 +453,9 @@ class BaseHookBasedPrivacyEngineTest:
         torch.manual_seed(42)
 
     def tearDown(self):
-        """Clean up hook-based engine."""
-        if hasattr(self, 'hook_controller') and self.hook_controller is not None:
-            self.hook_controller.cleanup()
+        """Clean up controller-based engine."""
+        if hasattr(self, "controller") and self.controller is not None:
+            self.controller.cleanup()
 
     def _init_vanilla_training(
         self,
@@ -488,7 +489,7 @@ class BaseHookBasedPrivacyEngineTest:
         opt_exclude_frozen=False,
     ):
         model = self._init_model()
-        model = PrivacyEngineHookBased.get_compatible_module(model)
+        model = PrivacyEngineGradSampleController.get_compatible_module(model)
         optimizer = torch.optim.SGD(
             (
                 model.parameters()
@@ -508,8 +509,8 @@ class BaseHookBasedPrivacyEngineTest:
             num_layers = len([p for p in model.parameters() if p.requires_grad])
             max_grad_norm = [max_grad_norm] * num_layers
 
-        self.privacy_engine = PrivacyEngineHookBased(secure_mode=secure_mode)
-        self.hook_controller, optimizer, poisson_dl = self.privacy_engine.make_private(
+        self.privacy_engine = PrivacyEngineGradSampleController(secure_mode=secure_mode)
+        self.controller, optimizer, poisson_dl = self.privacy_engine.make_private(
             module=model,
             optimizer=optimizer,
             data_loader=dl,
@@ -519,7 +520,7 @@ class BaseHookBasedPrivacyEngineTest:
             poisson_sampling=poisson_sampling,
             clipping=clipping,
             grad_sample_mode=grad_sample_mode,
-            return_hook_controller=True,
+            return_controller=True,
         )
 
         return model, optimizer, poisson_dl, self.privacy_engine
@@ -594,35 +595,37 @@ class BaseHookBasedPrivacyEngineTest:
             if p.requires_grad:
                 grad_sample_aggregated = get_grad_sample_aggregated(p, "mean")
                 self.assertTrue(
-                    torch.allclose(p.grad, grad_sample_aggregated, atol=10e-5, rtol=10e-3),
+                    torch.allclose(
+                        p.grad, grad_sample_aggregated, atol=10e-5, rtol=10e-3
+                    ),
                     f"Gradient mismatch. Expected {p.grad}, got {grad_sample_aggregated}",
                 )
 
-    def test_hook_controller_cleanup(self) -> None:
+    def test_controller_cleanup(self) -> None:
         """Test manual hook controller cleanup."""
         model = self._init_model()
-        model = PrivacyEngineHookBased.get_compatible_module(model)
+        model = PrivacyEngineGradSampleController.get_compatible_module(model)
         optimizer = torch.optim.SGD(model.parameters(), lr=self.LR, momentum=0)
         dl = self._init_data()
 
-        privacy_engine = PrivacyEngineHookBased()
-        hook_controller, optimizer, dl = privacy_engine.make_private(
+        privacy_engine = PrivacyEngineGradSampleController()
+        controller, optimizer, dl = privacy_engine.make_private(
             module=model,
             optimizer=optimizer,
             data_loader=dl,
             noise_multiplier=1.0,
             max_grad_norm=1.0,
             grad_sample_mode=self.GRAD_SAMPLE_MODE,
-            return_hook_controller=True,
+            return_controller=True,
         )
 
         self._train_steps(model, optimizer, dl, max_steps=1)
 
         # Should have hook controller
-        self.assertIsNotNone(hook_controller)
+        self.assertIsNotNone(controller)
 
         # Manual cleanup
-        hook_controller.cleanup()
+        controller.cleanup()
 
     def test_state_dict_no_wrapper_prefix(self) -> None:
         """Test that state dict has no _module prefix (not wrapped)."""
@@ -636,7 +639,7 @@ class BaseHookBasedPrivacyEngineTest:
         for key in state_dict.keys():
             self.assertFalse(
                 key.startswith("_module."),
-                f"State dict key {key} should not have _module prefix"
+                f"State dict key {key} should not have _module prefix",
             )
 
     def test_checkpoint_save_load(self) -> None:
@@ -677,6 +680,7 @@ class BaseHookBasedPrivacyEngineTest:
 
         # Clean up
         import os
+
         os.unlink(checkpoint_path)
 
     def test_flat_clipping(self) -> None:
@@ -895,7 +899,9 @@ class BaseHookBasedPrivacyEngineTest:
     def test_get_compatible_module_inaction(self) -> None:
         """Test that get_compatible_module creates a copy."""
         needs_no_replacement_module = nn.Linear(1, 2)
-        fixed_module = PrivacyEngineHookBased.get_compatible_module(needs_no_replacement_module)
+        fixed_module = PrivacyEngineGradSampleController.get_compatible_module(
+            needs_no_replacement_module
+        )
         self.assertFalse(fixed_module is needs_no_replacement_module)
         self.assertTrue(
             are_state_dict_equal(
@@ -908,7 +914,7 @@ class BaseHookBasedPrivacyEngineTest:
         resnet = models.resnet18()
         optimizer = torch.optim.SGD(resnet.parameters(), lr=1.0)
         dl = self._init_data()
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
         with self.assertRaises(UnsupportedModuleError):
             _, _, _ = privacy_engine.make_private(
                 module=resnet,
@@ -921,21 +927,21 @@ class BaseHookBasedPrivacyEngineTest:
 
     def test_model_validator_after_fix(self) -> None:
         """Test that privacy engine works after fixing unsupported modules."""
-        resnet = PrivacyEngineHookBased.get_compatible_module(models.resnet18())
+        resnet = PrivacyEngineGradSampleController.get_compatible_module(models.resnet18())
         optimizer = torch.optim.SGD(resnet.parameters(), lr=1.0)
         dl = self._init_data()
-        privacy_engine = PrivacyEngineHookBased()
-        hook_controller, _, _ = privacy_engine.make_private(
+        privacy_engine = PrivacyEngineGradSampleController()
+        controller, _, _ = privacy_engine.make_private(
             module=resnet,
             optimizer=optimizer,
             data_loader=dl,
             noise_multiplier=1.3,
             max_grad_norm=1,
             grad_sample_mode=self.GRAD_SAMPLE_MODE,
-            return_hook_controller=True,
+            return_controller=True,
         )
         self.assertTrue(True)
-        hook_controller.cleanup()
+        controller.cleanup()
 
     def test_make_private_with_epsilon(self) -> None:
         """Test make_private_with_epsilon method."""
@@ -945,23 +951,25 @@ class BaseHookBasedPrivacyEngineTest:
         epochs = 2
         total_steps = epochs * len(dl)
 
-        privacy_engine = PrivacyEngineHookBased()
-        hook_controller, optimizer, poisson_dl = privacy_engine.make_private_with_epsilon(
-            module=model,
-            optimizer=optimizer,
-            data_loader=dl,
-            target_epsilon=target_eps,
-            target_delta=1e-5,
-            epochs=epochs,
-            max_grad_norm=1.0,
-            grad_sample_mode=self.GRAD_SAMPLE_MODE,
-            return_hook_controller=True,
+        privacy_engine = PrivacyEngineGradSampleController()
+        controller, optimizer, poisson_dl = (
+            privacy_engine.make_private_with_epsilon(
+                module=model,
+                optimizer=optimizer,
+                data_loader=dl,
+                target_epsilon=target_eps,
+                target_delta=1e-5,
+                epochs=epochs,
+                max_grad_norm=1.0,
+                grad_sample_mode=self.GRAD_SAMPLE_MODE,
+                return_controller=True,
+            )
         )
         self._train_steps(model, optimizer, poisson_dl, max_steps=total_steps)
         self.assertAlmostEqual(
             target_eps, privacy_engine.get_epsilon(target_delta), places=2
         )
-        hook_controller.cleanup()
+        controller.cleanup()
 
     def test_parameters_match(self) -> None:
         """Test that optimizer and model parameters must be same objects."""
@@ -977,7 +985,7 @@ class BaseHookBasedPrivacyEngineTest:
         for p1, p2 in zip(m1.parameters(), m2.parameters()):
             self.assertTrue(torch.allclose(p1, p2))
 
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
         # but model parameters and optimizer parameters must be the same object,
         # not just same values
         with self.assertRaises(ValueError):
@@ -1060,6 +1068,7 @@ class BaseHookBasedPrivacyEngineTest:
         # load into set 2
         checkpoint_to_save = {"foo": "bar"}
         import io
+
         with io.BytesIO() as bytesio:
             pe1.save_checkpoint(
                 path=bytesio,
@@ -1107,7 +1116,7 @@ class BaseHookBasedPrivacyEngineTest:
         )
         dl = self._init_data()
         model = ModuleValidator.fix(model)
-        privacy_engine = PrivacyEngineHookBased()
+        privacy_engine = PrivacyEngineGradSampleController()
         with self.assertRaisesRegex(
             ValueError, "Module parameters are different than optimizer Parameters"
         ):
@@ -1124,16 +1133,16 @@ class BaseHookBasedPrivacyEngineTest:
         optimizer = torch.optim.SGD(
             model.parameters(), lr=0.01, momentum=0, weight_decay=0
         )
-        hook_controller, _, _ = privacy_engine.make_private(
+        controller, _, _ = privacy_engine.make_private(
             module=model,
             optimizer=optimizer,
             data_loader=dl,
             noise_multiplier=1.1,
             max_grad_norm=1.0,
             grad_sample_mode=self.GRAD_SAMPLE_MODE,
-            return_hook_controller=True,
+            return_controller=True,
         )
-        hook_controller.cleanup()
+        controller.cleanup()
 
     @given(
         noise_multiplier=st.floats(0.5, 5.0),
@@ -1210,6 +1219,7 @@ class BaseHookBasedPrivacyEngineTest:
 
 class SampleConvNet(nn.Module):
     """Simple ConvNet for testing."""
+
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv2d(1, 16, 8, 3)
@@ -1230,8 +1240,10 @@ class SampleConvNet(nn.Module):
         return x
 
 
-class PrivacyEngineHookBasedConvNetTest(BaseHookBasedPrivacyEngineTest, unittest.TestCase):
-    """Test hook-based privacy engine with ConvNet."""
+class PrivacyEngineGradSampleControllerConvNetGradSampleControllerTest(
+    BasePrivacyEngineGradSampleControllerTest, unittest.TestCase
+):
+    """Test controller-based privacy engine with ConvNet."""
 
     def _init_data(self):
         ds = TensorDataset(
@@ -1246,6 +1258,7 @@ class PrivacyEngineHookBasedConvNetTest(BaseHookBasedPrivacyEngineTest, unittest
 
 class SampleAttnNet(nn.Module):
     """LSTM + Attention model for testing."""
+
     def __init__(self):
         super().__init__()
         self.emb = nn.Embedding(100, 8)
@@ -1266,6 +1279,7 @@ class SampleAttnNet(nn.Module):
 
 class MockTextDataset(Dataset):
     """Mock text dataset."""
+
     def __init__(self, x: torch.Tensor, y: torch.Tensor, batch_first: bool = False):
         if batch_first:
             x_batch = x.shape[0]
@@ -1301,8 +1315,8 @@ def batch_second_collate(batch):
     return data, labels
 
 
-class PrivacyEngineHookBasedTextTest(BaseHookBasedPrivacyEngineTest, unittest.TestCase):
-    """Test hook-based privacy engine with text/attention model."""
+class PrivacyEngineGradSampleControllerTextGradSampleControllerTest(BasePrivacyEngineGradSampleControllerTest, unittest.TestCase):
+    """Test controller-based privacy engine with text/attention model."""
 
     def setUp(self):
         super().setUp()
@@ -1325,6 +1339,7 @@ class PrivacyEngineHookBasedTextTest(BaseHookBasedPrivacyEngineTest, unittest.Te
 
 class SampleTiedWeights(nn.Module):
     """Model with tied weights for testing."""
+
     def __init__(self, tie=True):
         super().__init__()
         self.emb = nn.Embedding(100, 8)
@@ -1351,8 +1366,10 @@ class SampleTiedWeights(nn.Module):
         return x
 
 
-class PrivacyEngineHookBasedTiedWeightsTest(BaseHookBasedPrivacyEngineTest, unittest.TestCase):
-    """Test hook-based privacy engine with tied weights."""
+class PrivacyEngineGradSampleControllerTiedWeightsGradSampleControllerTest(
+    BasePrivacyEngineGradSampleControllerTest, unittest.TestCase
+):
+    """Test controller-based privacy engine with tied weights."""
 
     def _init_data(self):
         ds = TensorDataset(
@@ -1367,6 +1384,7 @@ class PrivacyEngineHookBasedTiedWeightsTest(BaseHookBasedPrivacyEngineTest, unit
 
 class SampleFrozenConvNet(nn.Module):
     """ConvNet with some frozen layers."""
+
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv2d(1, 16, 8, 3)
@@ -1391,8 +1409,10 @@ class SampleFrozenConvNet(nn.Module):
         return x
 
 
-class PrivacyEngineHookBasedFrozenTest(BaseHookBasedPrivacyEngineTest, unittest.TestCase):
-    """Test hook-based privacy engine with frozen layers."""
+class PrivacyEngineGradSampleControllerFrozenGradSampleControllerTest(
+    BasePrivacyEngineGradSampleControllerTest, unittest.TestCase
+):
+    """Test controller-based privacy engine with frozen layers."""
 
     def _init_data(self):
         ds = TensorDataset(
@@ -1410,32 +1430,34 @@ class PrivacyEngineHookBasedFrozenTest(BaseHookBasedPrivacyEngineTest, unittest.
 # ============================================================================
 
 
-class PrivacyEngineHookBasedConvNetTestFunctorch(PrivacyEngineHookBasedConvNetTest):
-    """Test hook-based privacy engine with ConvNet using functorch."""
+class PrivacyEngineGradSampleControllerConvNetTestFunctorch(PrivacyEngineGradSampleControllerConvNetGradSampleControllerTest):
+    """Test controller-based privacy engine with ConvNet using functorch."""
 
     def setUp(self) -> None:
         super().setUp()
         self.GRAD_SAMPLE_MODE = "functorch"
 
 
-class PrivacyEngineHookBasedTextTestFunctorch(PrivacyEngineHookBasedTextTest):
-    """Test hook-based privacy engine with text model using functorch."""
+class PrivacyEngineGradSampleControllerTextTestFunctorch(PrivacyEngineGradSampleControllerTextGradSampleControllerTest):
+    """Test controller-based privacy engine with text model using functorch."""
 
     def setUp(self) -> None:
         super().setUp()
         self.GRAD_SAMPLE_MODE = "functorch"
 
 
-class PrivacyEngineHookBasedTiedWeightsTestFunctorch(PrivacyEngineHookBasedTiedWeightsTest):
-    """Test hook-based privacy engine with tied weights using functorch."""
+class PrivacyEngineGradSampleControllerTiedWeightsTestFunctorch(
+    PrivacyEngineGradSampleControllerTiedWeightsGradSampleControllerTest
+):
+    """Test controller-based privacy engine with tied weights using functorch."""
 
     def setUp(self) -> None:
         super().setUp()
         self.GRAD_SAMPLE_MODE = "functorch"
 
 
-class PrivacyEngineHookBasedFrozenTestFunctorch(PrivacyEngineHookBasedFrozenTest):
-    """Test hook-based privacy engine with frozen layers using functorch."""
+class PrivacyEngineGradSampleControllerFrozenTestFunctorch(PrivacyEngineGradSampleControllerFrozenGradSampleControllerTest):
+    """Test controller-based privacy engine with frozen layers using functorch."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -1444,4 +1466,3 @@ class PrivacyEngineHookBasedFrozenTestFunctorch(PrivacyEngineHookBasedFrozenTest
 
 if __name__ == "__main__":
     unittest.main()
-
