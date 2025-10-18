@@ -69,17 +69,7 @@ class PrivacyEngineHookBased:
         ... )
         >>> # ... training ...
         >>> privacy_engine.cleanup()  # Manual cleanup
-        >>>
-        >>> # Context manager usage (recommended)
-        >>> with PrivacyEngineHookBased() as privacy_engine:
-        ...     model, optimizer, dataloader = privacy_engine.make_private(
-        ...         module=model,
-        ...         optimizer=optimizer,
-        ...         data_loader=dataloader,
-        ...         noise_multiplier=1.0,
-        ...         max_grad_norm=1.0,
-        ...     )
-        ...     # ... training ...
+
         ... # Automatic cleanup on exit
     """
 
@@ -101,7 +91,6 @@ class PrivacyEngineHookBased:
         self.secure_mode = secure_mode
         self.secure_rng = None
         self.dataset = None
-        self.hook_controller = None  # Will be created in make_private
 
         if self.secure_mode:
             try:
@@ -233,7 +222,7 @@ class PrivacyEngineHookBased:
         loss_reduction: str = "mean",
         force_functorch: bool = False,
         strict: bool = False,
-    ) -> nn.Module:
+    ) -> Tuple[nn.Module, HookController]:
         """
         Prepare the model by attaching hooks directly (no wrapping).
 
@@ -245,14 +234,14 @@ class PrivacyEngineHookBased:
             strict: If True, validate that module has no buffers
 
         Returns:
-            The same module with hooks attached
+            Tuple of (module, hook_controller)
         """
         # Validate the module (will be done again in HookController if strict=True)
         self.validate(module=module, optimizer=None, data_loader=None)
 
         # Create hook controller and attach hooks
         # HookController will automatically get GRAD_SAMPLERS from GradSampleModule
-        self.hook_controller = HookController(
+        hook_controller = HookController(
             module,
             batch_first=batch_first,
             loss_reduction=loss_reduction,
@@ -260,7 +249,7 @@ class PrivacyEngineHookBased:
             strict=strict,
         )
 
-        return module
+        return module, hook_controller
 
     def is_compatible(
         self,
@@ -335,8 +324,9 @@ class PrivacyEngineHookBased:
         grad_sample_mode: str = "hooks",
         rand_on_empty: bool = False,
         force_functorch: bool = False,
+        return_hook_controller: bool = False,
         **kwargs,
-    ) -> Tuple[nn.Module, DPOptimizer, DataLoader]:
+    ) -> Union[Tuple[nn.Module, DPOptimizer, DataLoader], Tuple[HookController, DPOptimizer, DataLoader]]:
         """
         Add privacy-related responsibilities to the main PyTorch training objects.
 
@@ -358,9 +348,13 @@ class PrivacyEngineHookBased:
             grad_sample_mode: mode for computing per sample gradients
             rand_on_empty: Return random batch when encountering empty batches
             force_functorch: Force use of functorch for all modules
+            return_hook_controller: If True, return hook_controller instead of module.
+                This allows manual cleanup via hook_controller.cleanup().
+                The module can be accessed via hook_controller.target_module if needed.
 
         Returns:
-            Tuple of (model, optimizer, data_loader).
+            If return_hook_controller=False (default): Tuple of (model, optimizer, data_loader).
+            If return_hook_controller=True: Tuple of (hook_controller, optimizer, data_loader).
             Note: Model is NOT wrapped - it's the original module with hooks attached.
         """
         if noise_generator and self.secure_mode:
@@ -379,7 +373,7 @@ class PrivacyEngineHookBased:
         distributed = isinstance(module, (DPDDP, DDP, FSDPModule))
 
         # Prepare model (attach hooks directly, no wrapping)
-        module = self._prepare_model(
+        module, hook_controller = self._prepare_model(
             module,
             batch_first=batch_first,
             loss_reduction=loss_reduction,
@@ -388,7 +382,7 @@ class PrivacyEngineHookBased:
         )
 
         if poisson_sampling:
-            self.hook_controller.forbid_grad_accumulation()
+            hook_controller.forbid_grad_accumulation()
 
         data_loader = self._prepare_data_loader(
             data_loader,
@@ -422,7 +416,10 @@ class PrivacyEngineHookBased:
             self.accountant.get_optimizer_hook_fn(sample_rate=sample_rate)
         )
 
-        return module, optimizer, data_loader
+        if return_hook_controller:
+            return hook_controller, optimizer, data_loader
+        else:
+            return module, optimizer, data_loader
 
     def make_private_with_epsilon(
         self,
@@ -441,8 +438,9 @@ class PrivacyEngineHookBased:
         noise_generator=None,
         grad_sample_mode: str = "hooks",
         force_functorch: bool = False,
+        return_hook_controller: bool = False,
         **kwargs,
-    ) -> Tuple[nn.Module, DPOptimizer, DataLoader]:
+    ) -> Union[Tuple[nn.Module, DPOptimizer, DataLoader], Tuple[HookController, DPOptimizer, DataLoader]]:
         """
         Version of make_private that calculates privacy parameters based on a given privacy budget.
 
@@ -461,9 +459,11 @@ class PrivacyEngineHookBased:
             noise_generator: torch.Generator() object used as a source of randomness
             grad_sample_mode: mode for computing per sample gradients
             force_functorch: Force use of functorch for all modules
+            return_hook_controller: If True, return hook_controller instead of module
 
         Returns:
-            Tuple of (model, optimizer, data_loader)
+            If return_hook_controller=False (default): Tuple of (model, optimizer, data_loader).
+            If return_hook_controller=True: Tuple of (hook_controller, optimizer, data_loader).
         """
         sample_rate = 1 / len(data_loader)
 
@@ -494,6 +494,7 @@ class PrivacyEngineHookBased:
             poisson_sampling=poisson_sampling,
             clipping=clipping,
             force_functorch=force_functorch,
+            return_hook_controller=return_hook_controller,
             **kwargs,
         )
 
@@ -604,38 +605,3 @@ class PrivacyEngineHookBased:
             grad_clip_scheduler.load_state_dict(grad_clip_scheduler_state_dict)
 
         return checkpoint
-
-    def cleanup(self):
-        """
-        Clean up all hooks and attributes added to the model.
-        Call this when you're done with DP training.
-
-        Note: This is called automatically when using the privacy engine as a context manager.
-        """
-        if self.hook_controller is not None:
-            self.hook_controller.cleanup()
-            self.hook_controller = None
-
-    def __enter__(self):
-        """
-        Enter the context manager.
-
-        Returns:
-            self: The privacy engine instance
-        """
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """
-        Exit the context manager and perform cleanup.
-
-        Args:
-            exc_type: Exception type if an exception was raised
-            exc_val: Exception value if an exception was raised
-            exc_tb: Exception traceback if an exception was raised
-
-        Returns:
-            False: Don't suppress exceptions
-        """
-        self.cleanup()
-        return False
