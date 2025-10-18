@@ -20,11 +20,13 @@ from .grad_sample import (
     GradSampleController,
 )
 from .privacy_engine import PrivacyEngine
+from .privacy_engine_gsc import PrivacyEngineGradSampleController
 from .version import __version__
 
 
 __all__ = [
     "PrivacyEngine",
+    "PrivacyEngineGradSampleController",
     "GradSampleController",
     "GradSampleModule",
     "GradSampleModuleFastGradientClipping",
