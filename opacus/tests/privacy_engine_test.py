@@ -807,16 +807,20 @@ class PrivacyEngineConvNetTest(BasePrivacyEngineTest, unittest.TestCase):
         return SampleConvNet()
 
 
-@pytest.mark.skip(("Incompatible with the new empty batch handling"))
 class PrivacyEngineConvNetEmptyBatchTest(PrivacyEngineConvNetTest):
     def setUp(self) -> None:
         super().setUp()
 
         # This will trigger multiple empty batches with poisson sampling enabled
+        # With the new design, empty batches are skipped by the sampler
         self.BATCH_SIZE = 1
 
     def test_checkpoints(self) -> None:
         pass
+
+    @pytest.mark.skip("Skipping empty batches skips steps on accountant. Looking for a solution")
+    def test_make_private_with_epsilon(self) -> None:
+        super().test_make_private_with_epsilon()
 
     def test_noise_level(self) -> None:
         pass

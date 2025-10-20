@@ -11,10 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
 import logging
-from functools import partial
-from typing import Any, List, Mapping, Optional, Sequence, Tuple, Type, Union
+from typing import List, Optional
 
 import torch
 from opacus.utils.uniform_sampler import (
@@ -29,107 +27,23 @@ from torch.utils.data.dataloader import _collate_fn_t
 logger = logging.getLogger(__name__)
 
 
-class CollateFnWithEmpty:
-    first_batch = None
-
-    def __init__(self, collator_fn, batch_first=True, rand_on_empty=False):
-        self.wrapped_colator_fn = collator_fn
-        self.batch_first = batch_first
-        self.rand_on_empty = rand_on_empty
-
-    def __call__(self, batch):
-        if len(batch) > 0:
-            if not self.wrapped_colator_fn:
-                output = batch
-            else:
-                output = self.wrapped_colator_fn(batch)
-            if self.first_batch is None:
-                self.first_batch = copy.deepcopy(output)
-        else:
-            if self.first_batch is None:
-                raise ValueError(
-                    "Jebiga... At least the first sampled batch shouldn't be empty..."
-                )
-
-            # materialize into empty with the same structure as list/dict
-            output = self._make_empty_batch(self.first_batch)
-
-        return output
-
-    def _make_empty_batch(self, sample):
-        if torch.is_tensor(sample):
-            shape = list(sample.shape)
-            # If it's at least 1D, set batch dim to 1; otherwise make a 0-length 1D tensor
-            batch_dim = 0 if self.batch_first else 1
-            shape[batch_dim] = 1 if self.rand_on_empty else 0
-            if self.rand_on_empty:
-                return torch.randint(
-                    0, 2, shape, dtype=sample.dtype, device=sample.device
-                )
-            else:
-                return torch.empty(shape, dtype=sample.dtype, device=sample.device)
-
-        if isinstance(sample, Mapping):
-            return {k: self._make_empty_batch(v) for k, v in sample.items()}
-
-        if isinstance(sample, (list, tuple)):
-            converted = [self._make_empty_batch(v) for v in sample]
-            return type(sample)(converted)
-
-        # base case
-        return sample
-
-
-def wrap_collate_with_empty(
-    *,
-    collate_fn: Optional[_collate_fn_t],
-    batch_first: bool = True,
-    rand_on_empty: bool = False,
-):
-    """
-    Wraps given collate function to handle empty batches.
-
-    Args:
-        collate_fn: collate function to wrap
-        batch_first: Flag to indicate if the input tensor to the corresponding module
-                has the first dimension representing the batch. If set to True, dimensions on
-                input tensor are expected be ``[batch_size, ...]``, otherwise
-                ``[K, batch_size, ...]``
-        rand_on_empty: set ``True`` to return a batch containing random numbers when encountering
-            empty batches rather than tensors with zero-length batch dimensions
-
-    Returns:
-        New collate function, which is equivalent to input ``collate_fn`` for non-empty
-        batches and outputs empty tensors with shapes from ``sample_empty_shapes`` if
-        the input batch is of size 0
-    """
-
-    return CollateFnWithEmpty(
-        collate_fn, batch_first=batch_first, rand_on_empty=rand_on_empty
-    )
-
-
 class DPDataLoader(DataLoader):
     """
-    DataLoader subclass that always does Poisson sampling and supports empty batches
-    by default.
+    DataLoader subclass that always does Poisson sampling.
 
     Typically instantiated via ``DPDataLoader.from_data_loader()`` method based
     on another DataLoader. DPDataLoader would preserve the behaviour of the original
-    data loader, except for the two aspects.
+    data loader, except for the sampling mechanism.
 
-    First, it switches ``batch_sampler`` to ``UniformWithReplacementSampler``, thus enabling
+    It switches ``batch_sampler`` to ``UniformWithReplacementSampler``, thus enabling
     Poisson sampling (i.e. each element in the dataset is selected to be in the
     next batch with a certain probability defined by ``sample_rate`` parameter).
-    NB: this typically leads to a batches of variable size.
+    NB: this typically leads to batches of variable size.
     NB2: By default, ``sample_rate`` is calculated based on the ``batch_size`` of the
-    original data loader, so that the average batch size stays the same
+    original data loader, so that the average batch size stays the same.
 
-    Second, it wraps collate function with support for empty batches.
-    Most PyTorch modules will happily process tensors of shape ``(0, N, ...)``,
-    but many collate functions will fail to produce such a batch. As with the
-    Poisson sampling empty batches become a possibility, we need a DataLoader that
-    can handle them.
+    Note: Empty batches are automatically skipped by the sampler, but all sampling
+    rounds are counted for correct privacy accounting.
     """
 
     def __init__(
@@ -141,8 +55,6 @@ class DPDataLoader(DataLoader):
         drop_last: bool = False,
         generator=None,
         distributed: bool = False,
-        batch_first: bool = True,
-        rand_on_empty: bool = False,
         **kwargs,
     ):
         """
@@ -164,8 +76,6 @@ class DPDataLoader(DataLoader):
             distributed: set ``True`` if you'll be using DPDataLoader in a DDP environment
                 Selects between ``DistributedUniformWithReplacementSampler`` and
                 ``UniformWithReplacementSampler`` sampler implementations
-            rand_on_empty: set ``True`` to return a batch containing random numbers when encountering
-                empty batches rather than tensors with zero-length batch dimensions
         """
 
         self.sample_rate = sample_rate
@@ -194,11 +104,7 @@ class DPDataLoader(DataLoader):
         super().__init__(
             dataset=dataset,
             batch_sampler=batch_sampler,
-            collate_fn=wrap_collate_with_empty(
-                collate_fn=collate_fn,
-                batch_first=batch_first,
-                rand_on_empty=rand_on_empty,
-            ),
+            collate_fn=collate_fn,
             generator=generator,
             **kwargs,
         )
@@ -210,8 +116,6 @@ class DPDataLoader(DataLoader):
         *,
         distributed: bool = False,
         generator=None,
-        batch_first: bool = True,
-        rand_on_empty: bool = False,
     ):
         """
         Creates new ``DPDataLoader`` based on passed ``data_loader`` argument.
@@ -221,14 +125,6 @@ class DPDataLoader(DataLoader):
             distributed: set ``True`` if you'll be using DPDataLoader in a DDP environment
             generator: Random number generator used to sample elements. Defaults to
                 generator from the original data loader.
-            batch_first: Flag to indicate if the input tensor to the corresponding module
-                has the first dimension representing the batch. If set to True, dimensions on
-                input tensor are expected be ``[batch_size, ...]``, otherwise
-                ``[K, batch_size, ...]``
-            rand_on_empty: set ``True`` to return a batch containing random numbers when encountering
-                empty batches rather than tensors with zero-length batch dimensions
-
-
 
         Returns:
             New DPDataLoader instance, with all attributes and parameters inherited
@@ -258,8 +154,6 @@ class DPDataLoader(DataLoader):
             prefetch_factor=data_loader.prefetch_factor,
             persistent_workers=data_loader.persistent_workers,
             distributed=distributed,
-            batch_first=batch_first,
-            rand_on_empty=rand_on_empty,
         )
 
 

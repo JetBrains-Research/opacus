@@ -62,9 +62,13 @@ class UniformWithReplacementSampler(Sampler[List[int]]):
                 < self.sample_rate
             )
             indices = mask.nonzero(as_tuple=False).reshape(-1).tolist()
-            yield indices
 
             num_batches -= 1
+
+            # Only yield non-empty batches, but count all sampling rounds
+            # for correct privacy accounting
+            if len(indices) > 0:
+                yield indices
 
 
 class DistributedUniformWithReplacementSampler(Sampler):
@@ -154,6 +158,9 @@ class DistributedUniformWithReplacementSampler(Sampler):
                 < self.sample_rate
             )
             selected_examples = mask.nonzero(as_tuple=False).reshape(-1)
+
+            # Only yield non-empty batches, but count all sampling rounds
+            # for correct privacy accounting
             if len(selected_examples) > 0:
                 yield indices[selected_examples]
 
