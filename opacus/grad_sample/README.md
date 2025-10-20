@@ -35,7 +35,7 @@ Computes per-sample gradients by attaching hooks directly to model parameters wi
 - ✅ Better compatibility with HuggingFace transformers and models with custom `__getattr__`
 - ✅ Same grad sampler methods as `GradSampleModule`
 
-See [CONTROLLER_BASED_PRIVACY_ENGINE.md](../../CONTROLLER_BASED_PRIVACY_ENGINE.md) for detailed documentation.
+See [CONTROLLER_BASED_PRIVACY_ENGINE.md](../../docs/CONTROLLER_BASED_PRIVACY_ENGINE.md) for detailed documentation.
 
 ## Hooks-based approach (Model Wrapping)
 - Model wrapping class: ``opacus.grad_sample.grad_sample_module.GradSampleModule``
