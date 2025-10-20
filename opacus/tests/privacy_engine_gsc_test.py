@@ -32,10 +32,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from hypothesis import HealthCheck, given, settings
-from opt_einsum import contract
-from torch.utils.data import DataLoader, Dataset, TensorDataset
-from torchvision import models
-
 from opacus.layers.dp_multihead_attention import DPMultiheadAttention
 from opacus.optimizers.optimizer import _generate_noise
 from opacus.privacy_engine_gsc import PrivacyEngineGradSampleController
@@ -43,6 +39,9 @@ from opacus.schedulers import StepGradClip, StepNoise
 from opacus.utils.module_utils import are_state_dict_equal
 from opacus.validators.errors import UnsupportedModuleError
 from opacus.validators.module_validator import ModuleValidator
+from opt_einsum import contract
+from torch.utils.data import DataLoader, Dataset, TensorDataset
+from torchvision import models
 
 
 class SimpleNet(nn.Module):
@@ -927,7 +926,9 @@ class BasePrivacyEngineGradSampleControllerTest:
 
     def test_model_validator_after_fix(self) -> None:
         """Test that privacy engine works after fixing unsupported modules."""
-        resnet = PrivacyEngineGradSampleController.get_compatible_module(models.resnet18())
+        resnet = PrivacyEngineGradSampleController.get_compatible_module(
+            models.resnet18()
+        )
         optimizer = torch.optim.SGD(resnet.parameters(), lr=1.0)
         dl = self._init_data()
         privacy_engine = PrivacyEngineGradSampleController()
@@ -952,18 +953,16 @@ class BasePrivacyEngineGradSampleControllerTest:
         total_steps = epochs * len(dl)
 
         privacy_engine = PrivacyEngineGradSampleController()
-        controller, optimizer, poisson_dl = (
-            privacy_engine.make_private_with_epsilon(
-                module=model,
-                optimizer=optimizer,
-                data_loader=dl,
-                target_epsilon=target_eps,
-                target_delta=1e-5,
-                epochs=epochs,
-                max_grad_norm=1.0,
-                grad_sample_mode=self.GRAD_SAMPLE_MODE,
-                return_controller=True,
-            )
+        controller, optimizer, poisson_dl = privacy_engine.make_private_with_epsilon(
+            module=model,
+            optimizer=optimizer,
+            data_loader=dl,
+            target_epsilon=target_eps,
+            target_delta=1e-5,
+            epochs=epochs,
+            max_grad_norm=1.0,
+            grad_sample_mode=self.GRAD_SAMPLE_MODE,
+            return_controller=True,
         )
         self._train_steps(model, optimizer, poisson_dl, max_steps=total_steps)
         self.assertAlmostEqual(
@@ -1315,7 +1314,9 @@ def batch_second_collate(batch):
     return data, labels
 
 
-class PrivacyEngineGradSampleControllerTextGradSampleControllerTest(BasePrivacyEngineGradSampleControllerTest, unittest.TestCase):
+class PrivacyEngineGradSampleControllerTextGradSampleControllerTest(
+    BasePrivacyEngineGradSampleControllerTest, unittest.TestCase
+):
     """Test controller-based privacy engine with text/attention model."""
 
     def setUp(self):
@@ -1430,7 +1431,9 @@ class PrivacyEngineGradSampleControllerFrozenGradSampleControllerTest(
 # ============================================================================
 
 
-class PrivacyEngineGradSampleControllerConvNetTestFunctorch(PrivacyEngineGradSampleControllerConvNetGradSampleControllerTest):
+class PrivacyEngineGradSampleControllerConvNetTestFunctorch(
+    PrivacyEngineGradSampleControllerConvNetGradSampleControllerTest
+):
     """Test controller-based privacy engine with ConvNet using functorch."""
 
     def setUp(self) -> None:
@@ -1438,7 +1441,9 @@ class PrivacyEngineGradSampleControllerConvNetTestFunctorch(PrivacyEngineGradSam
         self.GRAD_SAMPLE_MODE = "functorch"
 
 
-class PrivacyEngineGradSampleControllerTextTestFunctorch(PrivacyEngineGradSampleControllerTextGradSampleControllerTest):
+class PrivacyEngineGradSampleControllerTextTestFunctorch(
+    PrivacyEngineGradSampleControllerTextGradSampleControllerTest
+):
     """Test controller-based privacy engine with text model using functorch."""
 
     def setUp(self) -> None:
@@ -1456,7 +1461,9 @@ class PrivacyEngineGradSampleControllerTiedWeightsTestFunctorch(
         self.GRAD_SAMPLE_MODE = "functorch"
 
 
-class PrivacyEngineGradSampleControllerFrozenTestFunctorch(PrivacyEngineGradSampleControllerFrozenGradSampleControllerTest):
+class PrivacyEngineGradSampleControllerFrozenTestFunctorch(
+    PrivacyEngineGradSampleControllerFrozenGradSampleControllerTest
+):
     """Test controller-based privacy engine with frozen layers using functorch."""
 
     def setUp(self) -> None:

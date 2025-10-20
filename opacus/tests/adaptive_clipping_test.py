@@ -40,7 +40,7 @@ class BaseAdaClipTest:
 
     def tearDown(self):
         """Clean up controller if needed."""
-        if hasattr(self, 'controller') and self.controller is not None:
+        if hasattr(self, "controller") and self.controller is not None:
             self.controller.cleanup()
 
     def _make_private(self, model, optimizer, **kwargs):
@@ -52,7 +52,9 @@ class BaseAdaClipTest:
         privacy_engine = self.ENGINE_CLASS()
 
         # Check if this is controller-based engine
-        is_controller_based = isinstance(privacy_engine, PrivacyEngineGradSampleController)
+        is_controller_based = isinstance(
+            privacy_engine, PrivacyEngineGradSampleController
+        )
 
         if is_controller_based:
             # Controller-based engine with return_controller=True
@@ -61,16 +63,13 @@ class BaseAdaClipTest:
                 optimizer=optimizer,
                 data_loader=self.dataloader,
                 return_controller=True,
-                **kwargs
+                **kwargs,
             )
             return model, optimizer, dataloader, controller
         else:
             # Standard engine
             model, optimizer, dataloader = privacy_engine.make_private(
-                module=model,
-                optimizer=optimizer,
-                data_loader=self.dataloader,
-                **kwargs
+                module=model, optimizer=optimizer, data_loader=self.dataloader, **kwargs
             )
             return model, optimizer, dataloader, None
 
@@ -100,12 +99,12 @@ class BaseAdaClipTest:
         self.assertIsInstance(optimizer, AdaClipDPOptimizer)
 
         # Verify AdaClip-specific attributes exist
-        self.assertTrue(hasattr(optimizer, 'target_unclipped_quantile'))
-        self.assertTrue(hasattr(optimizer, 'clipbound_learning_rate'))
-        self.assertTrue(hasattr(optimizer, 'max_clipbound'))
-        self.assertTrue(hasattr(optimizer, 'min_clipbound'))
-        self.assertTrue(hasattr(optimizer, 'unclipped_num'))
-        self.assertTrue(hasattr(optimizer, 'sample_size'))
+        self.assertTrue(hasattr(optimizer, "target_unclipped_quantile"))
+        self.assertTrue(hasattr(optimizer, "clipbound_learning_rate"))
+        self.assertTrue(hasattr(optimizer, "max_clipbound"))
+        self.assertTrue(hasattr(optimizer, "min_clipbound"))
+        self.assertTrue(hasattr(optimizer, "unclipped_num"))
+        self.assertTrue(hasattr(optimizer, "sample_size"))
 
     def test_adaclip_clipbound_updates(self):
         """Test that adaptive clipping actually updates the clipping bound."""
@@ -147,8 +146,9 @@ class BaseAdaClipTest:
         # Verify that clipbound changed during training
         unique_clipbounds = set(f"{cb:.6f}" for cb in clipbounds)
         self.assertGreater(
-            len(unique_clipbounds), 1,
-            f"Clipbound should change over time. Got values: {clipbounds}"
+            len(unique_clipbounds),
+            1,
+            f"Clipbound should change over time. Got values: {clipbounds}",
         )
 
         # Verify clipbound stays within bounds
@@ -193,17 +193,31 @@ class BaseAdaClipTest:
         self.assertIsNotNone(optimizer.max_grad_norm)
 
         # Verify sample_size is positive
-        sample_size = float(optimizer.sample_size) if torch.is_tensor(optimizer.sample_size) else optimizer.sample_size
-        self.assertGreater(sample_size, 0, "Sample size should be positive after training step")
+        sample_size = (
+            float(optimizer.sample_size)
+            if torch.is_tensor(optimizer.sample_size)
+            else optimizer.sample_size
+        )
+        self.assertGreater(
+            sample_size, 0, "Sample size should be positive after training step"
+        )
 
         # Compute unclipped fraction (convert to float if tensor)
         # Note: unclipped_num can be negative due to DP noise in AdaClip
-        unclipped_num = float(optimizer.unclipped_num) if torch.is_tensor(optimizer.unclipped_num) else optimizer.unclipped_num
+        unclipped_num = (
+            float(optimizer.unclipped_num)
+            if torch.is_tensor(optimizer.unclipped_num)
+            else optimizer.unclipped_num
+        )
         unclipped_frac = unclipped_num / sample_size
         # Due to DP noise, unclipped_frac may be slightly outside [0, 1]
         # Just verify it's been set and is a reasonable value
-        self.assertGreater(unclipped_frac, -0.5, "Unclipped fraction should not be too negative")
-        self.assertLess(unclipped_frac, 1.5, "Unclipped fraction should not be too large")
+        self.assertGreater(
+            unclipped_frac, -0.5, "Unclipped fraction should not be too negative"
+        )
+        self.assertLess(
+            unclipped_frac, 1.5, "Unclipped fraction should not be too large"
+        )
 
         # Do another step to verify counters work across multiple steps
         x, y = next(iter(dataloader))
@@ -214,7 +228,11 @@ class BaseAdaClipTest:
         optimizer.step()
 
         # After another step, counters should still be valid
-        sample_size2 = float(optimizer.sample_size) if torch.is_tensor(optimizer.sample_size) else optimizer.sample_size
+        sample_size2 = (
+            float(optimizer.sample_size)
+            if torch.is_tensor(optimizer.sample_size)
+            else optimizer.sample_size
+        )
         self.assertGreater(sample_size2, 0)
 
     def test_adaclip_convergence_behavior(self):
@@ -339,8 +357,7 @@ class BaseAdaClipTest:
                 break
 
         self.assertTrue(
-            params_differ,
-            "AdaClip and fixed clipping should produce different results"
+            params_differ, "AdaClip and fixed clipping should produce different results"
         )
 
         # Cleanup both controllers if they exist
@@ -408,11 +425,13 @@ class BaseAdaClipTest:
 
 class AdaClipStandardEngineTest(BaseAdaClipTest, unittest.TestCase):
     """Test AdaClipDPOptimizer with standard PrivacyEngine."""
+
     ENGINE_CLASS = PrivacyEngine
 
 
 class AdaClipGradSampleControllerEngineTest(BaseAdaClipTest, unittest.TestCase):
     """Test AdaClipDPOptimizer with GradSampleController-based PrivacyEngine."""
+
     ENGINE_CLASS = PrivacyEngineGradSampleController
 
 

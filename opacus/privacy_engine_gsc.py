@@ -24,7 +24,7 @@ This improves compatibility with transformers and other complex models.
 import os
 import warnings
 from itertools import chain
-from typing import Any, BinaryIO, Dict, IO, List, Optional, Tuple, Union, Type
+from typing import IO, Any, BinaryIO, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from opacus.accountants import create_accountant
@@ -274,78 +274,78 @@ class PrivacyEngineGradSampleController:
         Tuple[GradSampleController, DPOptimizer, DataLoader],
     ]:
         """
-        Add privacy-related responsibilities to the main PyTorch training objects:
-        model, optimizer, and the data loader.
+          Add privacy-related responsibilities to the main PyTorch training objects:
+          model, optimizer, and the data loader.
 
-      All of the returned objects act just like their non-private counterparts
-        passed as arguments, but with added DP tasks.
+        All of the returned objects act just like their non-private counterparts
+          passed as arguments, but with added DP tasks.
 
-        - Model is wrapped to also compute per sample gradients.
-        - Optimizer is now responsible for gradient clipping and adding noise to the gradients.
-        - Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
-        - DataLoader is updated to perform Poisson sampling.
+          - Model is wrapped to also compute per sample gradients.
+          - Optimizer is now responsible for gradient clipping and adding noise to the gradients.
+          - Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
+          - DataLoader is updated to perform Poisson sampling.
 
-        Notes:
-            Using any other models, optimizers, or data sources during training
-            will invalidate stated privacy guarantees.
+          Notes:
+              Using any other models, optimizers, or data sources during training
+              will invalidate stated privacy guarantees.
 
 
-        Unlike the standard PrivacyEngine, this method does NOT wrap the model in a
-        GradSampleModule. Instead, it attaches hooks directly to the model and manages
-        them through a GradSampleController.
+          Unlike the standard PrivacyEngine, this method does NOT wrap the model in a
+          GradSampleModule. Instead, it attaches hooks directly to the model and manages
+          them through a GradSampleController.
 
-        Args:
-           module: PyTorch module to be used for training
-            optimizer: Optimizer to be used for training
-            data_loader: DataLoader to be used for training
-            noise_multiplier: The ratio of the standard deviation of the Gaussian noise to
-                the L2-sensitivity of the function to which the noise is added
-                (How much noise to add)
-            max_grad_norm: The maximum norm of the per-sample gradients. Any gradient with norm
-                higher than this will be clipped to this value.
-            batch_first: Flag to indicate if the input tensor to the corresponding module
-                has the first dimension representing the batch. If set to True, dimensions on
-                input tensor are expected be ``[batch_size, ...]``, otherwise
-                ``[K, batch_size, ...]``
-            loss_reduction: Indicates if the loss reduction (for aggregating the gradients)
-                is a sum or a mean operation. Can take values "sum" or "mean"
-            poisson_sampling: ``True`` if you want to use standard sampling required
-                for DP guarantees. Setting ``False`` will leave provided data_loader
-                unchanged. Technically this doesn't fit the assumptions made by
-                privacy accounting mechanism, but it can be a good approximation when
-                using Poisson sampling is unfeasible.
-            clipping: Per sample gradient clipping mechanism ("flat" or "per_layer" or "adaptive").
-                Flat clipping calculates the norm of the entire gradient over
-                all parameters, per layer clipping sets individual norms for
-                every parameter tensor, and adaptive clipping updates clipping bound per iteration.
-                Flat clipping is usually preferred, but using per layer clipping in combination
-                with distributed training can provide notable performance gains.
-            noise_generator: torch.Generator() object used as a source of randomness for
-                the noise
-            grad_sample_mode: mode for computing per sample gradients. Determines the
-                implementation class for the wrapped ``module``. See
-                :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
-                details
-            strict: If True, will raise an error if the module is incompatible with
-                grad_sample_mode and will not attach hooks.
-            rand_on_empty: Indicates to return a batch containing random numbers when encountering
-                empty batches samples with Poisson sampling rather than tensors with zero-length batch dimensions
-            return_controller: If True, return controller instead of module.
-                This allows manual cleanup via controller.cleanup().
-                The module can be accessed via controller.target_module if needed.
+          Args:
+             module: PyTorch module to be used for training
+              optimizer: Optimizer to be used for training
+              data_loader: DataLoader to be used for training
+              noise_multiplier: The ratio of the standard deviation of the Gaussian noise to
+                  the L2-sensitivity of the function to which the noise is added
+                  (How much noise to add)
+              max_grad_norm: The maximum norm of the per-sample gradients. Any gradient with norm
+                  higher than this will be clipped to this value.
+              batch_first: Flag to indicate if the input tensor to the corresponding module
+                  has the first dimension representing the batch. If set to True, dimensions on
+                  input tensor are expected be ``[batch_size, ...]``, otherwise
+                  ``[K, batch_size, ...]``
+              loss_reduction: Indicates if the loss reduction (for aggregating the gradients)
+                  is a sum or a mean operation. Can take values "sum" or "mean"
+              poisson_sampling: ``True`` if you want to use standard sampling required
+                  for DP guarantees. Setting ``False`` will leave provided data_loader
+                  unchanged. Technically this doesn't fit the assumptions made by
+                  privacy accounting mechanism, but it can be a good approximation when
+                  using Poisson sampling is unfeasible.
+              clipping: Per sample gradient clipping mechanism ("flat" or "per_layer" or "adaptive").
+                  Flat clipping calculates the norm of the entire gradient over
+                  all parameters, per layer clipping sets individual norms for
+                  every parameter tensor, and adaptive clipping updates clipping bound per iteration.
+                  Flat clipping is usually preferred, but using per layer clipping in combination
+                  with distributed training can provide notable performance gains.
+              noise_generator: torch.Generator() object used as a source of randomness for
+                  the noise
+              grad_sample_mode: mode for computing per sample gradients. Determines the
+                  implementation class for the wrapped ``module``. See
+                  :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
+                  details
+              strict: If True, will raise an error if the module is incompatible with
+                  grad_sample_mode and will not attach hooks.
+              rand_on_empty: Indicates to return a batch containing random numbers when encountering
+                  empty batches samples with Poisson sampling rather than tensors with zero-length batch dimensions
+              return_controller: If True, return controller instead of module.
+                  This allows manual cleanup via controller.cleanup().
+                  The module can be accessed via controller.target_module if needed.
 
-        Returns:
-            If return_gs_controller=False (default): Tuple of (model, optimizer, data_loader).
-            If return_gs_controller=True: Tuple of (controller, optimizer, data_loader).
-            Note: Model is NOT wrapped - it's the original module with hooks attached.
+          Returns:
+              If return_gs_controller=False (default): Tuple of (model, optimizer, data_loader).
+              If return_gs_controller=True: Tuple of (controller, optimizer, data_loader).
+              Note: Model is NOT wrapped - it's the original module with hooks attached.
 
-            Optimizer is a wrapper around the original optimizer that also does
-             gradient clipping and noise addition to the gradients
-            Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
-                Only returned when grad_sample_mode is "ghost".
-            DataLoader is a brand new DataLoader object, constructed to behave as
-                equivalent to the original data loader, possibly with updated
-                sampling mechanism. Points to the same dataset object.
+              Optimizer is a wrapper around the original optimizer that also does
+               gradient clipping and noise addition to the gradients
+              Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
+                  Only returned when grad_sample_mode is "ghost".
+              DataLoader is a brand new DataLoader object, constructed to behave as
+                  equivalent to the original data loader, possibly with updated
+                  sampling mechanism. Points to the same dataset object.
         """
         if noise_generator and self.secure_mode:
             raise ValueError("Passing seed is prohibited in secure mode")

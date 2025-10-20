@@ -15,9 +15,9 @@
 
 from . import utils
 from .grad_sample import (
+    GradSampleController,
     GradSampleModule,
     GradSampleModuleFastGradientClipping,
-    GradSampleController,
 )
 from .privacy_engine import PrivacyEngine
 from .privacy_engine_gsc import PrivacyEngineGradSampleController
