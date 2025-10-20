@@ -142,8 +142,6 @@ class PrivacyEngineGradSampleController:
         *,
         poisson_sampling: bool,
         distributed: bool,
-        batch_first: bool = True,
-        rand_on_empty: bool = False,
     ) -> DataLoader:
         if self.dataset is None:
             self.dataset = data_loader.dataset
@@ -162,8 +160,6 @@ class PrivacyEngineGradSampleController:
                 data_loader,
                 generator=self.secure_rng,
                 distributed=distributed,
-                batch_first=batch_first,
-                rand_on_empty=rand_on_empty,
             )
         elif self.secure_mode:
             return switch_generator(data_loader=data_loader, generator=self.secure_rng)
@@ -266,7 +262,6 @@ class PrivacyEngineGradSampleController:
         noise_generator=None,
         grad_sample_mode: str = "hooks",
         strict: bool = True,
-        rand_on_empty: bool = False,
         return_controller: bool = False,
         **kwargs,
     ) -> Union[
@@ -328,8 +323,6 @@ class PrivacyEngineGradSampleController:
                 details
             strict: If True, will raise an error if the module is incompatible with
                 grad_sample_mode and will not attach hooks.
-            rand_on_empty: Indicates to return a batch containing random numbers when encountering
-                empty batches samples with Poisson sampling rather than tensors with zero-length batch dimensions
             return_controller: If True, return controller instead of module.
                 This allows manual cleanup via controller.cleanup().
                 The module can be accessed via controller.target_module if needed.
@@ -377,8 +370,6 @@ class PrivacyEngineGradSampleController:
             data_loader,
             distributed=distributed,
             poisson_sampling=poisson_sampling,
-            batch_first=batch_first,
-            rand_on_empty=rand_on_empty,
         )
 
         sample_rate = 1 / len(data_loader)
@@ -428,7 +419,6 @@ class PrivacyEngineGradSampleController:
         noise_generator=None,
         grad_sample_mode: str = "hooks",
         strict: bool = True,
-        rand_on_empty: bool = False,
         return_controller: bool = False,
         **kwargs,
     ) -> Union[
@@ -478,8 +468,6 @@ class PrivacyEngineGradSampleController:
                 details
             strict: If True, will raise an error if the module is incompatible with
                 grad_sample_mode and will not attach hooks.
-            rand_on_empty: Indicates to return a batch containing random numbers when encountering
-                empty batches samples with Poisson sampling rather than tensors with zero-length batch dimensions
             return_controller: If True, return controller instead of module.
                 This allows manual cleanup via controller.cleanup().
                 The module can be accessed via controller.target_module if needed.
@@ -527,7 +515,6 @@ class PrivacyEngineGradSampleController:
             poisson_sampling=poisson_sampling,
             clipping=clipping,
             strict=strict,
-            rand_on_empty=rand_on_empty,
             return_controller=return_controller,
             **kwargs,
         )
