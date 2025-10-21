@@ -50,10 +50,13 @@ class DPTensorFastGradientClipping:
         self.loss_reduction = loss_reduction
 
     def item(self):
+        return self.detach().item()
+
+    def detach(self):
         if self.loss_reduction == "mean":
-            return torch.mean(self.loss_per_sample).detach().item()
+            return torch.mean(self.loss_per_sample).detach()
         elif self.loss_reduction == "sum":
-            return torch.sum(self.loss_per_sample).detach().item()
+            return torch.sum(self.loss_per_sample).detach()
 
     def __truediv__(self, other):
         """
