@@ -27,6 +27,9 @@ from itertools import chain
 from typing import IO, Any, BinaryIO, Dict, List, Optional, Tuple, Union
 
 import torch
+from torch.nn import Module
+
+from opacus import GradSampleController
 from opacus.accountants import create_accountant
 from opacus.accountants.utils import get_noise_multiplier
 from opacus.data_loader import DPDataLoader, switch_generator
@@ -35,6 +38,7 @@ from opacus.grad_sample import GradSampleController
 from opacus.grad_sample.grad_sample_controller_fast_gradient_clipping import (
     GradSampleControllerFastGradientClipping,
 )
+from opacus.utils.fast_gradient_clipping_utils import DPLossFastGradientClipping
 from opacus.grad_sample.utils import wrap_model_in_controller
 from opacus.optimizers import DPOptimizer, get_optimizer_class
 from opacus.schedulers import _GradClipScheduler, _NoiseScheduler
@@ -205,6 +209,26 @@ class PrivacyEngineGradSampleController:
 
         return controller
 
+    def _prepare_criterion(
+        self,
+        *,
+        controller: GradSampleControllerFastGradientClipping,
+        optimizer: DPOptimizer,
+        criterion: nn.Module = nn.CrossEntropyLoss(),
+        loss_reduction: str = "mean",
+        **kwargs,
+    ) -> DPLossFastGradientClipping:
+        """
+        Args:
+            controller: GradSampleControllerFastGradientClipping used for training,
+            optimizer: DPOptimizer used for training,
+            criterion: Loss function used for training,
+            loss_reduction: "mean" or "sum", indicates if the loss reduction (for aggregating the gradients)
+
+        Prepare the DP loss class, which packages the two backward passes for fast gradient clipping.
+        """
+        return DPLossFastGradientClipping(controller, optimizer, criterion, loss_reduction)
+
     def is_compatible(
         self,
         *,
@@ -271,6 +295,7 @@ class PrivacyEngineGradSampleController:
         *,
         module: nn.Module,
         optimizer: optim.Optimizer,
+        criterion: nn.Module = nn.CrossEntropyLoss(),
         data_loader: DataLoader,
         noise_multiplier: float,
         max_grad_norm: Union[float, List[float]],
@@ -285,13 +310,12 @@ class PrivacyEngineGradSampleController:
         return_controller: bool = False,
         **kwargs,
     ) -> Union[
-        Tuple[nn.Module, DPOptimizer, DataLoader],
         Tuple[
-            Union[GradSampleController, GradSampleControllerFastGradientClipping],
-            DPOptimizer,
-            DataLoader,
+            GradSampleController, DPOptimizer, DPLossFastGradientClipping, DataLoader
         ],
-    ]:
+        Tuple[Module, DPOptimizer, DPLossFastGradientClipping, DataLoader],
+        Tuple[GradSampleController, DPOptimizer, DataLoader],
+        Tuple[Module, DPOptimizer, DataLoader]]:
         """
           Add privacy-related responsibilities to the main PyTorch training objects:
           model, optimizer, and the data loader.
@@ -316,6 +340,7 @@ class PrivacyEngineGradSampleController:
           Args:
              module: PyTorch module to be used for training
               optimizer: Optimizer to be used for training
+              criterion: Loss function to be used for training
               data_loader: DataLoader to be used for training
               noise_multiplier: The ratio of the standard deviation of the Gaussian noise to
                   the L2-sensitivity of the function to which the noise is added
@@ -425,6 +450,20 @@ class PrivacyEngineGradSampleController:
         optimizer.attach_step_hook(
             self.accountant.get_optimizer_hook_fn(sample_rate=sample_rate)
         )
+
+        if "ghost" in grad_sample_mode:
+            criterion = self._prepare_criterion(
+                controller=controller,
+                optimizer=optimizer,
+                criterion=criterion,
+                loss_reduction=loss_reduction,
+                **kwargs,
+            )
+
+            if return_controller:
+                return controller, optimizer, criterion, data_loader
+            else:
+                return module, optimizer, criterion, data_loader
 
         if return_controller:
             return controller, optimizer, data_loader
