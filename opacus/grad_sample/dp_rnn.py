@@ -19,6 +19,7 @@ from typing import Dict, List
 import torch
 import torch.nn as nn
 from opacus.layers.dp_rnn import RNNLinear
+from torch.distributed._tensor.experimental import implicit_replication
 
 from .utils import register_grad_sampler
 
@@ -43,9 +44,12 @@ def compute_rnn_linear_grad_sample(
     activations = activations.to(backprops.dtype)
 
     ret = {}
-    if layer.weight.requires_grad:
-        gs = torch.einsum("n...i,n...j->nij", backprops, activations)
-        ret[layer.weight] = gs
-    if layer.bias is not None and layer.bias.requires_grad:
-        ret[layer.bias] = torch.einsum("n...k->nk", backprops)
+
+    # Use implicit_replication to handle mixed Tensor/DTensor in einsum
+    with implicit_replication():
+        if layer.weight.requires_grad:
+            gs = torch.einsum("n...i,n...j->nij", backprops, activations)
+            ret[layer.weight] = gs
+        if layer.bias is not None and layer.bias.requires_grad:
+            ret[layer.bias] = torch.einsum("n...k->nk", backprops)
     return ret

@@ -55,6 +55,77 @@ OPACUS_PARAM_MONKEYPATCH_ATTRS = [
 ]
 
 
+def _create_or_accumulate_grad_sample_dtensor_aware(
+    *, param: nn.Parameter, grad_sample: torch.Tensor, max_batch_len: int
+) -> None:
+    """
+    DTensor-aware version of create_or_accumulate_grad_sample.
+
+    Creates a ``_current_grad_sample`` attribute in the given parameter, or adds to it
+    if the ``_current_grad_sample`` attribute already exists.
+
+    When grad_sample is a DTensor, creates _current_grad_sample as a DTensor with
+    proper local shape calculation.
+
+    Args:
+        param: Parameter to which ``grad_sample`` will be added
+        grad_sample: Per-sample gradients tensor. Must be of the same
+            shape as ``param`` with extra batch dimension
+        max_batch_len: Maximum batch length for zero initialization
+    """
+    if param.requires_grad:
+        if hasattr(param, "_current_grad_sample"):
+            param._current_grad_sample[: grad_sample.shape[0]] += grad_sample
+        else:
+            # Check if grad_sample is a DTensor and create _current_grad_sample accordingly
+            try:
+                from torch.distributed.tensor import DTensor
+
+                if isinstance(grad_sample, DTensor):
+                    # Create a DTensor zeros tensor with same mesh and placements
+                    # Use grad_sample.shape which gives the global shape for DTensor
+                    global_shape = torch.Size([max_batch_len]) + grad_sample.shape[1:]
+
+                    # Compute local shape based on placements
+                    local_shape = list(global_shape)
+                    for i, placement in enumerate(grad_sample.placements):
+                        if placement.is_shard():
+                            shard_dim = placement.dim
+                            # Adjust the shape at shard_dim
+                            if shard_dim < len(local_shape):
+                                mesh_dim_size = grad_sample.device_mesh.size(i)
+                                local_shape[shard_dim] = (
+                                    local_shape[shard_dim] // mesh_dim_size
+                                )
+
+                    local_zeros = torch.zeros(
+                        tuple(local_shape),
+                        device=grad_sample.device,
+                        dtype=grad_sample.dtype,
+                    )
+                    param._current_grad_sample = DTensor.from_local(
+                        local_zeros,
+                        device_mesh=grad_sample.device_mesh,
+                        placements=grad_sample.placements,
+                        run_check=False,
+                    )
+                else:
+                    # Regular tensor - use standard approach
+                    param._current_grad_sample = torch.zeros(
+                        torch.Size([max_batch_len]) + grad_sample.shape[1:],
+                        device=grad_sample.device,
+                        dtype=grad_sample.dtype,
+                    )
+            except ImportError:
+                # DTensor not available, use regular tensor
+                param._current_grad_sample = torch.zeros(
+                    torch.Size([max_batch_len]) + grad_sample.shape[1:],
+                    device=grad_sample.device,
+                    dtype=grad_sample.dtype,
+                )
+            param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
+
+
 class GradSampleController:
     """
     Controller for managing privacy hooks on models without wrapping them
@@ -295,7 +366,8 @@ class GradSampleController:
 
         grad_samples = grad_sampler_fn(module, activations, backprops)
         for param, gs in grad_samples.items():
-            create_or_accumulate_grad_sample(
+            # Use DTensor-aware version for proper DTensor handling
+            _create_or_accumulate_grad_sample_dtensor_aware(
                 param=param, grad_sample=gs, max_batch_len=module.max_batch_len
             )
 

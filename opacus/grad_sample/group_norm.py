@@ -19,6 +19,7 @@ from typing import Dict, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed._tensor.experimental import implicit_replication
 
 from .utils import register_grad_sampler
 
@@ -39,9 +40,12 @@ def compute_group_norm_grad_sample(
     """
     activations = activations[0]
     ret = {}
-    if layer.weight.requires_grad:
-        gs = F.group_norm(activations, layer.num_groups, eps=layer.eps) * backprops
-        ret[layer.weight] = torch.einsum("ni...->ni", gs)
-    if layer.bias is not None and layer.bias.requires_grad:
-        ret[layer.bias] = torch.einsum("ni...->ni", backprops)
+
+    # Use implicit_replication to handle mixed Tensor/DTensor operations
+    with implicit_replication():
+        if layer.weight.requires_grad:
+            gs = F.group_norm(activations, layer.num_groups, eps=layer.eps) * backprops
+            ret[layer.weight] = torch.einsum("ni...->ni", gs)
+        if layer.bias is not None and layer.bias.requires_grad:
+            ret[layer.bias] = torch.einsum("ni...->ni", backprops)
     return ret

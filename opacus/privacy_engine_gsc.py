@@ -125,16 +125,35 @@ class PrivacyEngineGradSampleController:
             grad_sample_mode=grad_sample_mode,
         )
 
-        return optim_class(
-            optimizer=optimizer,
-            noise_multiplier=noise_multiplier,
-            max_grad_norm=max_grad_norm,
-            expected_batch_size=expected_batch_size,
-            loss_reduction=loss_reduction,
-            generator=generator,
-            secure_mode=self.secure_mode,
-            **kwargs,
-        )
+        # For TP mode, pass controller to optimizer
+        if grad_sample_mode == "tp":
+            if "controller" not in kwargs:
+                raise ValueError(
+                    "TP optimizer requires 'controller' argument. "
+                    "This should be passed automatically by make_private()."
+                )
+            return optim_class(
+                optimizer=optimizer,
+                controller=kwargs.pop("controller"),
+                noise_multiplier=noise_multiplier,
+                max_grad_norm=max_grad_norm,
+                expected_batch_size=expected_batch_size,
+                loss_reduction=loss_reduction,
+                generator=generator,
+                secure_mode=self.secure_mode,
+                **kwargs,
+            )
+        else:
+            return optim_class(
+                optimizer=optimizer,
+                noise_multiplier=noise_multiplier,
+                max_grad_norm=max_grad_norm,
+                expected_batch_size=expected_batch_size,
+                loss_reduction=loss_reduction,
+                generator=generator,
+                secure_mode=self.secure_mode,
+                **kwargs,
+            )
 
     def _prepare_data_loader(
         self,
@@ -162,8 +181,6 @@ class PrivacyEngineGradSampleController:
                 data_loader,
                 generator=self.secure_rng,
                 distributed=distributed,
-                batch_first=batch_first,
-                rand_on_empty=rand_on_empty,
             )
         elif self.secure_mode:
             return switch_generator(data_loader=data_loader, generator=self.secure_rng)
@@ -388,6 +405,10 @@ class PrivacyEngineGradSampleController:
         if distributed:
             world_size = torch.distributed.get_world_size()
             expected_batch_size /= world_size
+
+        # For TP mode, pass controller to optimizer
+        if grad_sample_mode == "tp":
+            kwargs["controller"] = controller
 
         optimizer = self._prepare_optimizer(
             optimizer=optimizer,

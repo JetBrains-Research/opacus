@@ -19,6 +19,7 @@ from typing import Dict, List
 import torch
 import torch.nn as nn
 from opacus.layers.dp_multihead_attention import SequenceBias
+from torch.distributed._tensor.experimental import implicit_replication
 
 from .utils import register_grad_sampler
 
@@ -36,6 +37,9 @@ def compute_sequence_bias_grad_sample(
         backprops: Backpropagations
     """
     ret = {}
-    if layer.bias.requires_grad:
-        ret[layer.bias] = backprops[:, -1]
+
+    # Use implicit_replication to handle mixed Tensor/DTensor operations
+    with implicit_replication():
+        if layer.bias.requires_grad:
+            ret[layer.bias] = backprops[:, -1]
     return ret

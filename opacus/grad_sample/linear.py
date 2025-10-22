@@ -18,6 +18,7 @@ from typing import Dict, List
 
 import torch
 import torch.nn as nn
+from torch.distributed._tensor.experimental import implicit_replication
 
 from .utils import register_grad_sampler, register_norm_sampler
 
@@ -39,15 +40,19 @@ def compute_linear_grad_sample(
         backprops: Backpropagations
     """
     activations = activations[0]
-
     activations = activations.to(backprops.dtype)
 
     ret = {}
-    if layer.weight.requires_grad:
-        gs = torch.einsum("n...i,n...j->nij", backprops, activations)
-        ret[layer.weight] = gs
-    if layer.bias is not None and layer.bias.requires_grad:
-        ret[layer.bias] = torch.einsum("n...k->nk", backprops)
+
+    # Use implicit_replication to handle mixed Tensor/DTensor operations
+    # This also works fine with regular tensors (no-op overhead)
+    with implicit_replication():
+        if layer.weight.requires_grad:
+            gs = torch.einsum("n...i,n...j->nij", backprops, activations)
+            ret[layer.weight] = gs
+        if layer.bias is not None and layer.bias.requires_grad:
+            ret[layer.bias] = torch.einsum("n...k->nk", backprops)
+
     return ret
 
 
@@ -66,28 +71,36 @@ def compute_linear_norm_sample(
     activations = activations[0]
     activations = activations.to(backprops.dtype)
 
-    ret = {}
+    # Use implicit_replication to handle mixed Tensor/DTensor operations
+    # This also works fine with regular tensors (no-op overhead)
+    with implicit_replication():
+        ret = {}
 
-    if backprops.dim() == 2:
-        if layer.weight.requires_grad:
-            g = torch.einsum("n...i,n...i->n", backprops, backprops)
-            a = torch.einsum("n...j,n...j->n", activations, activations)
-            ret[layer.weight] = torch.sqrt((g * a).flatten())
-        if layer.bias is not None and layer.bias.requires_grad:
-            ret[layer.bias] = torch.sqrt(
-                torch.einsum("n...i,n...i->n", backprops, backprops).flatten()
-            )
-    elif backprops.dim() == 3:
-        if layer.weight.requires_grad:
+        if backprops.dim() == 2:
+            if layer.weight.requires_grad:
+                g = torch.einsum("n...i,n...i->n", backprops, backprops)
+                a = torch.einsum("n...j,n...j->n", activations, activations)
+                ret[layer.weight] = torch.sqrt((g * a).flatten())
+            if layer.bias is not None and layer.bias.requires_grad:
+                ret[layer.bias] = torch.sqrt(
+                    torch.einsum("n...i,n...i->n", backprops, backprops).flatten()
+                )
+        elif backprops.dim() == 3:
+            if layer.weight.requires_grad:
 
-            ggT = torch.einsum("nik,njk->nij", backprops, backprops)  # batchwise g g^T
-            aaT = torch.einsum(
-                "nik,njk->nij", activations, activations
-            )  # batchwise a a^T
-            ga = torch.einsum("n...i,n...i->n", ggT, aaT).clamp(min=0)
+                ggT = torch.einsum(
+                    "nik,njk->nij", backprops, backprops
+                )  # batchwise g g^T
+                aaT = torch.einsum(
+                    "nik,njk->nij", activations, activations
+                )  # batchwise a a^T
+                ga = torch.einsum("n...i,n...i->n", ggT, aaT).clamp(min=0)
 
-            ret[layer.weight] = torch.sqrt(ga)
-        if layer.bias is not None and layer.bias.requires_grad:
-            ggT = torch.einsum("nik,njk->nij", backprops, backprops)  # batchwise g g^T
-            ret[layer.bias] = torch.sqrt(torch.einsum("n...i->n", ggT).clamp(min=0))
+                ret[layer.weight] = torch.sqrt(ga)
+            if layer.bias is not None and layer.bias.requires_grad:
+                ggT = torch.einsum(
+                    "nik,njk->nij", backprops, backprops
+                )  # batchwise g g^T
+                ret[layer.bias] = torch.sqrt(torch.einsum("n...i->n", ggT).clamp(min=0))
+
     return ret

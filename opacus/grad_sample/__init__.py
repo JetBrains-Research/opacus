@@ -19,6 +19,7 @@ from .dp_rnn import compute_rnn_linear_grad_sample  # noqa
 from .embedding import compute_embedding_grad_sample  # noqa
 from .embedding_norm_sample import compute_embedding_norm_sample  # noqa
 from .grad_sample_controller import GradSampleController  # noqa
+from .grad_sample_controller_tp import GradSampleControllerTP  # noqa
 from .grad_sample_module import GradSampleModule, create_or_accumulate_grad_sample
 from .grad_sample_module_fast_gradient_clipping import (  # noqa
     GradSampleModuleFastGradientClipping,
@@ -47,6 +48,7 @@ from .utils import (
 
 __all__ = [
     "GradSampleController",
+    "GradSampleControllerTP",
     "GradSampleModule",
     "GradSampleModuleFastGradientClipping",
     "GradSampleModuleFastGradientClippingFSDP",

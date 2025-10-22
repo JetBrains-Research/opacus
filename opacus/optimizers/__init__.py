@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .adaclipoptimizer import AdaClipDPOptimizer
+from .adaclipoptimizer_tp import AdaClipDPOptimizerTP
 from .ddp_perlayeroptimizer import SimpleDistributedPerLayerOptimizer
 from .ddpoptimizer import DistributedDPOptimizer
 from .ddpoptimizer_fast_gradient_clipping import (
@@ -21,14 +22,17 @@ from .ddpoptimizer_fast_gradient_clipping import (
 from .fsdpoptimizer_fast_gradient_clipping import FSDPOptimizerFastGradientClipping
 from .optimizer import DPOptimizer
 from .optimizer_fast_gradient_clipping import DPOptimizerFastGradientClipping
+from .optimizer_tp import DPOptimizerTP
 from .perlayeroptimizer import DPPerLayerOptimizer
 
 
 __all__ = [
     "AdaClipDPOptimizer",
+    "AdaClipDPOptimizerTP",
     "DistributedDPOptimizer",
     "DPOptimizer",
     "DPOptimizerFastGradientClipping",
+    "DPOptimizerTP",
     "DistributedDPOptimizerFastGradientlipping",
     "FSDPOptimizerFastGradientClipping",
     "DPPerLayerOptimizer",
@@ -37,7 +41,17 @@ __all__ = [
 
 
 def get_optimizer_class(clipping: str, distributed: bool, grad_sample_mode: str = None):
-    if grad_sample_mode == "ghost":
+    if grad_sample_mode == "tp":
+        if clipping == "flat":
+            return DPOptimizerTP
+        elif clipping == "adaptive":
+            from .adaclipoptimizer_tp import AdaClipDPOptimizerTP
+            return AdaClipDPOptimizerTP
+        else:
+            raise ValueError(
+                f"Tensor Parallelism only supports flat and adaptive clipping. Got: {clipping}"
+            )
+    elif grad_sample_mode == "ghost":
         if clipping == "flat" and distributed is False:
             return DPOptimizerFastGradientClipping
         elif clipping == "flat" and distributed is True:

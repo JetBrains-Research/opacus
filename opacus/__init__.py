@@ -16,6 +16,7 @@
 from . import utils
 from .grad_sample import (
     GradSampleController,
+    GradSampleControllerTP,
     GradSampleModule,
     GradSampleModuleFastGradientClipping,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "PrivacyEngine",
     "PrivacyEngineGradSampleController",
     "GradSampleController",
+    "GradSampleControllerTP",
     "GradSampleModule",
     "GradSampleModuleFastGradientClipping",
     "utils",

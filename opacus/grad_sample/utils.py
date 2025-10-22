@@ -127,7 +127,7 @@ def wrap_model_in_controller(model: nn.Module, grad_sample_mode: str, *args, **k
 
 def get_gsc_class(grad_sample_mode: str) -> Type[GradSampleController]:
     """
-    Returns AbstractGradSampleModule subclass corresponding to the input mode.
+    Returns GradSampleController subclass corresponding to the input mode.
     See README for a detailed comparison between grad sample modes.
 
     :param grad_sample_mode:
@@ -135,8 +135,12 @@ def get_gsc_class(grad_sample_mode: str) -> Type[GradSampleController]:
     """
     if grad_sample_mode in ["hooks", "functorch"]:
         return GradSampleController
+    elif grad_sample_mode == "tp":
+        from .grad_sample_controller_tp import GradSampleControllerTP
+
+        return GradSampleControllerTP
     else:
         raise ValueError(
             f"Unexpected grad_sample_mode: {grad_sample_mode}. "
-            f"Allowed values: hooks, functorch"
+            f"Allowed values: hooks, functorch, tp"
         )
