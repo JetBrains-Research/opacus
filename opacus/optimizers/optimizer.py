@@ -462,7 +462,9 @@ class DPOptimizer(Optimizer):
             # for mixed precision, optimizer parameters are usually in FP32
             # lower precision grads will be cast up to FP32
             grad_sample = grad_sample.to(p.dtype)
-            clip_factor_on_device = per_sample_clip_factor.to(grad_sample.device).to(p.dtype)
+            clip_factor_on_device = per_sample_clip_factor.to(grad_sample.device).to(
+                p.dtype
+            )
             grad = torch.einsum("i,i...", clip_factor_on_device, grad_sample)
 
             if p.summed_grad is not None:
