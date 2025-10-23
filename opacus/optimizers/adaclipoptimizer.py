@@ -27,7 +27,6 @@ from .optimizer import (
     _mark_as_processed,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -39,21 +38,21 @@ class AdaClipDPOptimizer(DPOptimizer):
     """
 
     def __init__(
-        self,
-        optimizer: Optimizer,
-        *,
-        noise_multiplier: float,
-        target_unclipped_quantile: float,
-        clipbound_learning_rate: float,
-        max_clipbound: float,
-        min_clipbound: float,
-        unclipped_num_std: float,
-        max_grad_norm: float,
-        expected_batch_size: Optional[int],
-        loss_reduction: str = "mean",
-        generator=None,
-        secure_mode: bool = False,
-        **kwargs,
+            self,
+            optimizer: Optimizer,
+            *,
+            noise_multiplier: float,
+            target_unclipped_quantile: float,
+            clipbound_learning_rate: float,
+            max_clipbound: float,
+            min_clipbound: float,
+            unclipped_num_std: float,
+            max_grad_norm: float,
+            expected_batch_size: Optional[int],
+            loss_reduction: str = "mean",
+            generator=None,
+            secure_mode: bool = False,
+            **kwargs,
     ):
         super().__init__(
             optimizer,
@@ -79,8 +78,8 @@ class AdaClipDPOptimizer(DPOptimizer):
         # Theorem 1. in  https://arxiv.org/pdf/1905.03871.pdf
         if self.noise_multiplier > 0:  # if noise_multiplier = 0 then it stays zero
             self.noise_multiplier = (
-                self.noise_multiplier ** (-2) - (2 * unclipped_num_std) ** (-2)
-            ) ** (-1 / 2)
+                                            self.noise_multiplier ** (-2) - (2 * unclipped_num_std) ** (-2)
+                                    ) ** (-1 / 2)
         self.sample_size = 0
         self.unclipped_num = 0
 
@@ -97,6 +96,11 @@ class AdaClipDPOptimizer(DPOptimizer):
         per_param_norms = [
             g.view(len(g), -1).norm(2, dim=-1) for g in self.grad_samples
         ]
+
+        if per_param_norms:
+            target_device = per_param_norms[0].device
+            per_param_norms = [norm.to(target_device) for norm in per_param_norms]
+
         per_sample_norms = torch.stack(per_param_norms, dim=1).norm(2, dim=1)
         per_sample_clip_factor = (self.max_grad_norm / (per_sample_norms + 1e-6)).clamp(
             max=1.0
@@ -106,13 +110,15 @@ class AdaClipDPOptimizer(DPOptimizer):
         # relative to the parent DPOptimizer class.
         self.sample_size += len(per_sample_clip_factor)
         self.unclipped_num += (
-            len(per_sample_clip_factor) - (per_sample_clip_factor < 1).sum()
+                len(per_sample_clip_factor) - (per_sample_clip_factor < 1).sum()
         )
 
         for p in self.params:
             _check_processed_flag(p.grad_sample)
             grad_sample = self._get_flat_grad_sample(p)
-            grad = torch.einsum("i,i...", per_sample_clip_factor, grad_sample)
+
+            clip_factor_on_device = per_sample_clip_factor.to(grad_sample.device)
+            grad = torch.einsum("i,i...", clip_factor_on_device, grad_sample)
 
             if p.summed_grad is not None:
                 p.summed_grad += grad
@@ -148,7 +154,7 @@ class AdaClipDPOptimizer(DPOptimizer):
             self.max_grad_norm = self.min_clipbound
 
     def pre_step(
-        self, closure: Optional[Callable[[], float]] = None
+            self, closure: Optional[Callable[[], float]] = None
     ) -> Optional[float]:
         pre_step_full = super().pre_step()
         if pre_step_full:
