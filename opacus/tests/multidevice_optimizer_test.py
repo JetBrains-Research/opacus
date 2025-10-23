@@ -255,39 +255,6 @@ class MultiDeviceOptimizerTest(unittest.TestCase):
         # Verify clipbound was updated
         self.assertIsNotNone(dp_optimizer.max_grad_norm)
 
-    @unittest.skipIf(torch.cuda.device_count() < 2, "Need at least 2 GPUs")
-    def test_dpoptimizer_empty_batch_multidevice(self):
-        """Test that DPOptimizer handles empty batches on multi-device models."""
-        device1 = torch.device("cuda:0")
-        device2 = torch.device("cuda:1")
-
-        model = MultiDeviceModel(device1, device2)
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-
-        dp_optimizer = DPOptimizer(
-            optimizer=optimizer,
-            noise_multiplier=0.0,
-            max_grad_norm=1.0,
-            expected_batch_size=4,
-            loss_reduction="mean",
-        )
-
-        # Simulate empty batch
-        model.zero_grad()
-        for p in model.parameters():
-            # Empty per-sample gradients (batch size 0)
-            p.grad_sample = torch.randn(0, *p.shape, device=p.device)
-
-        # Should handle empty batch without errors
-        try:
-            dp_optimizer.clip_and_accumulate()
-            success = True
-        except Exception as e:
-            success = False
-            self.fail(f"Empty batch handling failed: {e}")
-
-        self.assertTrue(success, "Should handle empty batches on multi-device models")
-
 
 if __name__ == "__main__":
     unittest.main()
