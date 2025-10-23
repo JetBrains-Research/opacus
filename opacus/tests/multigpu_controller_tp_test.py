@@ -153,14 +153,13 @@ def run_test_privacy_engine_integration(rank, world_size):
     # Setup privacy engine
     privacy_engine = PrivacyEngineGradSampleController()
 
-    # Make private with TP mode
+    # Make private - TP will be auto-detected
     controller, optimizer, _ = privacy_engine.make_private(
         module=model,
         optimizer=optimizer,
         data_loader=dummy_loader,
         noise_multiplier=1.0,
         max_grad_norm=1.0,
-        grad_sample_mode="tp",
         poisson_sampling=False,
         return_controller=True,
     )
@@ -236,7 +235,6 @@ def run_test_compare_to_vanilla(rank, world_size):
         data_loader=dummy_loader_tp,
         noise_multiplier=0.0,  # No noise for comparison
         max_grad_norm=1e20,  # Effectively no clipping
-        grad_sample_mode="tp",
         poisson_sampling=False,
         return_controller=True,
     )
@@ -338,7 +336,7 @@ def run_test_adaclip_tp(rank, world_size):
     # Setup privacy engine with AdaClip
     privacy_engine = PrivacyEngineGradSampleController()
 
-    # Make private with TP mode and adaptive clipping
+    # Make private with TP (auto-detected) and adaptive clipping
     # Note: AdaClip requires noise_multiplier < 2 * unclipped_num_std (Theorem 1)
     controller, optimizer, _ = privacy_engine.make_private(
         module=model,
@@ -346,7 +344,6 @@ def run_test_adaclip_tp(rank, world_size):
         data_loader=dummy_loader,
         noise_multiplier=0.1,
         max_grad_norm=1.0,
-        grad_sample_mode="tp",
         clipping="adaptive",
         target_unclipped_quantile=0.5,
         clipbound_learning_rate=0.1,

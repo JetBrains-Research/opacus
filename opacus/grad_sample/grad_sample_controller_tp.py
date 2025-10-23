@@ -56,18 +56,15 @@ class GradSampleControllerTP(GradSampleController):
         >>> tp_mesh = init_device_mesh("cuda", (world_size,))
         >>> model = parallelize_module(model, tp_mesh, parallelization_plan)
         >>>
-        >>> # Create TP-aware controller
-        >>> controller = GradSampleControllerTP(model, batch_first=True, loss_reduction="mean")
-        >>>
-        >>> # Use with PrivacyEngineGradSampleController
+        >>> # Use with PrivacyEngineGradSampleController (TP auto-detected)
         >>> privacy_engine = PrivacyEngineGradSampleController()
         >>> controller, optimizer, dataloader = privacy_engine.make_private(
         ...     module=model,
         ...     optimizer=optimizer,
         ...     data_loader=dataloader,
-        ...     grad_sample_mode="tp",
         ...     return_controller=True
         ... )
+        >>> # TP mode is automatically detected from DTensor parameters!
     """
 
     def __init__(

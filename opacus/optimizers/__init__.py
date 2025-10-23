@@ -83,3 +83,24 @@ def get_optimizer_class(clipping: str, distributed: bool, grad_sample_mode: str 
     raise ValueError(
         f"Unexpected optimizer parameters. Clipping: {clipping}, distributed: {distributed}"
     )
+
+def get_optimizer_class_controller(clipping: str, distributed: bool, grad_sample_mode: str = None, tensor_parallel: bool = False):
+    if tensor_parallel is True:
+        if clipping == "flat":
+            return DPOptimizerTP
+        elif clipping == "adaptive":
+            return AdaClipDPOptimizerTP
+        else:
+            raise ValueError(
+                f"Tensor Parallelism only supports flat and adaptive clipping. Got: {clipping}"
+            )
+    elif clipping == "flat" and distributed is False:
+        return DPOptimizer
+    elif clipping == "flat" and distributed is True:
+        return DistributedDPOptimizer
+    elif clipping == "adaptive" and distributed is False:
+        return AdaClipDPOptimizer
+    raise ValueError(
+        f"Unexpected optimizer parameters. Clipping: {clipping}, "
+        f"distributed: {distributed}, tensor_parallel: {tensor_parallel}"
+    )

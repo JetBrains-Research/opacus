@@ -32,8 +32,8 @@ from opacus.accountants.utils import get_noise_multiplier
 from opacus.data_loader import DPDataLoader, switch_generator
 from opacus.distributed import DifferentiallyPrivateDistributedDataParallel as DPDDP
 from opacus.grad_sample import GradSampleController
-from opacus.grad_sample.utils import wrap_model_in_controller
-from opacus.optimizers import DPOptimizer, get_optimizer_class
+from opacus.grad_sample.utils import wrap_model_controller
+from opacus.optimizers import DPOptimizer, get_optimizer_class, get_optimizer_class_controller
 from opacus.schedulers import _GradClipScheduler, _NoiseScheduler
 from opacus.validators.module_validator import ModuleValidator
 from torch import nn, optim
@@ -107,7 +107,7 @@ class PrivacyEngineGradSampleController:
         distributed: bool = False,
         clipping: str = "flat",
         noise_generator=None,
-        grad_sample_mode="hooks",
+        tensor_parallel: bool = False,
         **kwargs,
     ) -> DPOptimizer:
         if isinstance(optimizer, DPOptimizer):
@@ -119,14 +119,14 @@ class PrivacyEngineGradSampleController:
         elif noise_generator is not None:
             generator = noise_generator
 
-        optim_class = get_optimizer_class(
+        optim_class = get_optimizer_class_controller(
             clipping=clipping,
             distributed=distributed,
-            grad_sample_mode=grad_sample_mode,
+            tensor_parallel=tensor_parallel,
         )
 
         # For TP mode, pass controller to optimizer
-        if grad_sample_mode == "tp":
+        if tensor_parallel:
             if "controller" not in kwargs:
                 raise ValueError(
                     "TP optimizer requires 'controller' argument. "
@@ -187,6 +187,25 @@ class PrivacyEngineGradSampleController:
         else:
             return data_loader
 
+    def _has_dtensor_parameters(self, module: nn.Module) -> bool:
+        """
+        Check if module has any DTensor parameters (indicating tensor parallelism).
+
+        Args:
+            module: PyTorch module to check
+
+        Returns:
+            True if any parameter is a DTensor, False otherwise
+        """
+        try:
+            from torch.distributed.tensor import DTensor
+            for param in module.parameters():
+                if isinstance(param, DTensor):
+                    return True
+            return False
+        except ImportError:
+            return False
+
     def _prepare_model(
         self,
         module: nn.Module,
@@ -195,14 +214,16 @@ class PrivacyEngineGradSampleController:
         loss_reduction: str = "mean",
         strict: bool = False,
         grad_sample_mode: str = "hooks",
+        tensor_parallel: bool = False,
     ) -> GradSampleController:
 
-        controller = wrap_model_in_controller(
+        controller = wrap_model_controller(
             module,
             grad_sample_mode=grad_sample_mode,
             batch_first=batch_first,
             loss_reduction=loss_reduction,
             strict=strict,
+            tensor_parallel=tensor_parallel,
         )
 
         return controller
@@ -340,8 +361,8 @@ class PrivacyEngineGradSampleController:
               noise_generator: torch.Generator() object used as a source of randomness for
                   the noise
               grad_sample_mode: mode for computing per sample gradients. Determines the
-                  implementation class for the wrapped ``module``. See
-                  :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
+                  implementation class for the wrapped ``module``. Supported values: "hooks", "functorch".
+                  See :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
                   details
               strict: If True, will raise an error if the module is incompatible with
                   grad_sample_mode and will not attach hooks.
@@ -379,6 +400,14 @@ class PrivacyEngineGradSampleController:
 
         distributed = isinstance(module, (DPDDP, DDP, FSDPModule))
 
+        # Auto-detect tensor parallelism
+        tensor_parallel = self._has_dtensor_parameters(module)
+        if tensor_parallel:
+            warnings.warn(
+                "Auto-detected DTensor parameters in model. "
+                "Automatically using tensor parallelism-aware controller (GradSampleControllerTP)."
+            )
+
         # Prepare model (attach hooks directly, no wrapping)
         controller = self._prepare_model(
             module,
@@ -386,6 +415,7 @@ class PrivacyEngineGradSampleController:
             loss_reduction=loss_reduction,
             grad_sample_mode=grad_sample_mode,
             strict=strict,
+            tensor_parallel=tensor_parallel,
         )
         if poisson_sampling:
             controller.forbid_grad_accumulation()
@@ -407,7 +437,7 @@ class PrivacyEngineGradSampleController:
             expected_batch_size /= world_size
 
         # For TP mode, pass controller to optimizer
-        if grad_sample_mode == "tp":
+        if tensor_parallel:
             kwargs["controller"] = controller
 
         optimizer = self._prepare_optimizer(
@@ -419,7 +449,7 @@ class PrivacyEngineGradSampleController:
             noise_generator=noise_generator,
             distributed=distributed,
             clipping=clipping,
-            grad_sample_mode=grad_sample_mode,
+            tensor_parallel=tensor_parallel,
             **kwargs,
         )
 

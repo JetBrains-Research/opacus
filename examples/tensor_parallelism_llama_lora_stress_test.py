@@ -224,7 +224,6 @@ def model_parallel(rank, world_size):
         data_loader=dummy_loader,
         noise_multiplier=0.5,  # Moderate noise
         max_grad_norm=1.0,
-        grad_sample_mode="tp",
         poisson_sampling=False,
         return_controller=True,
     )

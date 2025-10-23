@@ -149,14 +149,13 @@ def model_parallel(rank, world_size):
     # Setup privacy engine with TP-aware controller
     privacy_engine = PrivacyEngineGradSampleController()
 
-    # Make model private using TP grad_sample_mode
+    # Make model private - TP will be auto-detected from DTensor parameters
     controller, optimizer, _ = privacy_engine.make_private(
         module=llama_model,
         optimizer=optimizer,
         data_loader=dummy_loader,
         noise_multiplier=0.0,  # No noise for testing
         max_grad_norm=1.0,
-        grad_sample_mode="tp",  # Use TP-aware controller
         poisson_sampling=False,
         return_controller=True,  # Get controller for inspection
     )
