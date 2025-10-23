@@ -23,38 +23,22 @@ combining the benefits of:
 """
 
 import logging
-from functools import partial
-from typing import Iterable, List, Tuple
+from typing import List
 
 import torch
 import torch.nn as nn
-from opacus.grad_sample.functorch import ft_compute_per_sample_gradient, prepare_layer
+from opacus.grad_sample.functorch import ft_compute_per_sample_gradient
+from opacus.grad_sample.grad_sample_controller import GradSampleController
 from opacus.grad_sample.grad_sample_module import (
-    _get_batch_size,
     create_or_accumulate_grad_sample,
     promote_current_grad_sample,
 )
-from opacus.layers.dp_rnn import DPGRU, DPLSTM, DPRNN, RNNLinear
-from opacus.utils.module_utils import (
-    has_trainable_params,
-    requires_grad,
-    trainable_modules,
-    trainable_parameters,
-)
-from opacus.validators.errors import UnsupportedModuleError
-from torch.utils.hooks import RemovableHandle
+from opacus.layers.dp_rnn import DPGRU, DPLSTM, DPRNN
+from opacus.utils.module_utils import trainable_modules, trainable_parameters
 
 
 logger = logging.getLogger(__name__)
 logger.disabled = True
-
-
-OPACUS_PARAM_MONKEYPATCH_ATTRS = [
-    "grad_sample",
-    "_forward_counter",
-    "_current_grad_sample",
-    "_norm_sample",
-]
 
 
 def create_norm_sample(
@@ -88,12 +72,12 @@ def create_norm_sample(
             )
 
 
-class GradSampleControllerFastGradientClipping:
+class GradSampleControllerFastGradientClipping(GradSampleController):
     """
     Controller for managing privacy hooks with Fast Gradient and Ghost Clipping support
 
-    Computes per-sample gradient norms using custom-written methods for each layer,
-    without wrapping the model. Supports both:
+    Extends GradSampleController to add ghost clipping support for memory-efficient
+    gradient norm computation. Supports both:
     - Ghost Clipping: Direct norm computation without materializing full gradients
     - Fast Gradient Clipping: Full gradient computation followed by norm computation
 
@@ -102,7 +86,6 @@ class GradSampleControllerFastGradientClipping:
     with transformers and other complex models.
     """
 
-    GRAD_SAMPLERS = {}
     NORM_SAMPLERS = {}
 
     def __init__(
@@ -146,12 +129,25 @@ class GradSampleControllerFastGradientClipping:
                 If ``strict`` is set to ``True`` and module ``m`` (or any of its
                 submodules) includes a buffer.
         """
-        errors = self.validate(module=m, strict=strict)
-        if errors and not strict:
-            logger.info(
-                f"GradSampleControllerFastGradientClipping found the following errors: {errors}."
-                "Using non-strict mode, continuing"
-            )
+        # Call parent constructor
+        super().__init__(
+            m,
+            batch_first=batch_first,
+            loss_reduction=loss_reduction,
+            strict=strict,
+            force_functorch=force_functorch,
+        )
+
+        # Add ghost clipping specific attributes
+        self.max_grad_norm = max_grad_norm
+        self.use_ghost_clipping = use_ghost_clipping
+        self._per_sample_gradient_norms = None
+
+        # Initialize _norm_sample attribute for parameters
+        for _, p in trainable_parameters(self.module):
+            p._norm_sample = None
+
+        self.trainable_parameters = [p for _, p in trainable_parameters(self.module)]
 
         if logger.isEnabledFor(logging.INFO):
             self.log_module_gradient_sample_mode(
@@ -159,122 +155,6 @@ class GradSampleControllerFastGradientClipping:
                 force_functorch=force_functorch,
                 use_ghost_clipping=use_ghost_clipping,
             )
-
-        self.module = m
-        self.hooks_enabled = False
-        self.grad_accumulation_allowed = True
-        self.batch_first = batch_first
-        self.loss_reduction = loss_reduction
-        self.force_functorch = force_functorch
-        self.max_grad_norm = max_grad_norm
-        self.use_ghost_clipping = use_ghost_clipping
-        self._per_sample_gradient_norms = None
-
-        self.autograd_grad_sample_hooks: List[RemovableHandle] = []
-
-        # Initialize parameters with required attributes
-        for _, p in trainable_parameters(self.module):
-            p.grad_sample = None
-            p._forward_counter = 0
-            p._norm_sample = None
-
-        self.trainable_parameters = [p for _, p in trainable_parameters(self.module)]
-
-        # Add the hooks
-        self.add_hooks()
-
-    def iterate_submodules(self, module: nn.Module) -> Iterable[nn.Module]:
-        if has_trainable_params(module):
-            yield module
-
-        # Don't recurse if module is handled by functorch
-        if (
-            has_trainable_params(module)
-            and type(module) not in self.GRAD_SAMPLERS
-            and type(module) not in [DPRNN, DPLSTM, DPGRU]
-        ):
-            return
-
-        for m in module.children():
-            yield from self.iterate_submodules(m)
-
-    def add_hooks(self) -> None:
-        """
-        Adds hooks to model to save activations and backprop values.
-        The hooks will
-        1. save activations into param.activations during forward pass
-        2. compute per-sample gradient norms in params._norm_sample during backward pass.
-        Call ``remove_hooks(model)`` to disable this.
-        """
-        for module in self.iterate_submodules(self.module):
-            # Do not add hooks to DPRNN, DPLSTM or DPGRU
-            if type(module) in [DPRNN, DPLSTM, DPGRU]:
-                continue
-
-            module_type = type(module)
-            if self.force_functorch or not (module_type in self.GRAD_SAMPLERS):
-                prepare_layer(module, batch_first=self.batch_first)
-
-            self.autograd_grad_sample_hooks.append(
-                module.register_forward_hook(self.capture_activations_hook)
-            )
-
-            self.autograd_grad_sample_hooks.append(
-                module.register_full_backward_hook(
-                    partial(
-                        self.capture_backprops_hook,
-                        loss_reduction=self.loss_reduction,
-                        batch_first=self.batch_first,
-                    )
-                )
-            )
-
-        self.enable_hooks()
-
-    def remove_hooks(self) -> None:
-        """
-        Removes hooks added by ``add_hooks()``
-        """
-        self.disable_hooks()
-
-        while self.autograd_grad_sample_hooks:
-            handle = self.autograd_grad_sample_hooks.pop()
-            handle.remove()
-
-        # Remove functorch hooks
-        for _module_name, module in trainable_modules(self.module):
-            if hasattr(module, "ft_compute_sample_grad"):
-                delattr(module, "ft_compute_sample_grad")
-            if hasattr(module, "activations"):
-                delattr(module, "activations")
-
-    def disable_hooks(self) -> None:
-        r"""
-        Globally disable all hooks installed by this library.
-        Why is this needed? As per https://github.com/pytorch/pytorch/issues/25723, there is
-        a bug in Autograd that makes removing hooks do nothing if the graph was already
-        constructed. For this reason, we have this method to at least turn them off.
-        """
-        self.hooks_enabled = False
-
-    def enable_hooks(self) -> None:
-        r"""
-        The opposite of ``disable_hooks()``. Hooks are always enabled unless you explicitly
-        disable them so you don't need to call this unless you want to re-enable them.
-        """
-        self.hooks_enabled = True
-
-    def cleanup(self):
-        """
-        Clean up all hooks and attributes added to the model.
-        """
-        self.remove_hooks()
-
-        # Clean up parameter attributes
-        for attr in OPACUS_PARAM_MONKEYPATCH_ATTRS:
-            for p in self.module.parameters():
-                if hasattr(p, attr):
-                    delattr(p, attr)
 
     def get_clipping_coef(self) -> torch.Tensor:
         """Get per-example gradient scaling factor for clipping."""
@@ -295,30 +175,23 @@ class GradSampleControllerFastGradientClipping:
         forward_input: List[torch.Tensor],
         _forward_output: torch.Tensor,
     ):
-        if (
-            not requires_grad(module)
-            or not module.training
-            or not torch.is_grad_enabled()
-        ):
-            return
+        """
+        Override parent method to add parameter tying check for ghost clipping.
+        """
+        # Call parent implementation
+        super().capture_activations_hook(module, forward_input, _forward_output)
 
-        if not self.hooks_enabled:
-            return
-
-        if not hasattr(module, "activations"):
-            module.activations = []
-        module.activations.append([t.detach() for t in forward_input])  # pyre-ignore
-
-        for _, p in trainable_parameters(module):
-            p._forward_counter += 1
-            if (
-                self.use_ghost_clipping
-                and p._forward_counter > 1
-                and type(module) in self.NORM_SAMPLERS
-            ):
-                raise NotImplementedError(
-                    "Parameter tying is not supported with Ghost Clipping"
-                )
+        # Add ghost clipping specific check for parameter tying
+        if self.hooks_enabled:
+            for _, p in trainable_parameters(module):
+                if (
+                    self.use_ghost_clipping
+                    and p._forward_counter > 1
+                    and type(module) in self.NORM_SAMPLERS
+                ):
+                    raise NotImplementedError(
+                        "Parameter tying is not supported with Ghost Clipping"
+                    )
 
     def capture_backprops_hook(
         self,
@@ -408,111 +281,6 @@ class GradSampleControllerFastGradientClipping:
         if len(module.activations) == 0:
             if hasattr(module, "max_batch_len"):
                 del module.max_batch_len
-
-    def rearrange_grad_samples(
-        self,
-        *,
-        module: nn.Module,
-        backprops: torch.Tensor,
-        loss_reduction: str,
-        batch_first: bool,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Rearrange activations and grad_samples based on loss reduction and batch dim
-
-        Args:
-            module: the module for which per-sample gradients are computed
-            backprops: the captured backprops
-            loss_reduction: either "mean" or "sum" depending on whether backpropped
-                loss was averaged or summed over batch
-            batch_first: True is batch dimension is first
-
-        Returns:
-            Tuple of (activations, backprops)
-        """
-        if not hasattr(module, "activations"):
-            raise ValueError(
-                f"No activations detected for {type(module)},"
-                " run forward after add_hooks(model)"
-            )
-
-        batch_dim = 0 if batch_first or type(module) is RNNLinear else 1
-
-        if not hasattr(module, "max_batch_len"):
-            # For packed sequences, max_batch_len is set in the forward of the model (e.g. the LSTM)
-            # Otherwise we infer it here
-            module.max_batch_len = _get_batch_size(
-                module=module,
-                batch_dim=batch_dim,
-            )
-        activations = module.activations.pop()
-
-        n = module.max_batch_len
-        if loss_reduction == "mean":
-            backprops = backprops * n
-        elif loss_reduction == "sum":
-            backprops = backprops
-        else:
-            raise ValueError(
-                f"loss_reduction = {loss_reduction}. Only 'sum' and 'mean' losses are supported"
-            )
-
-        # No matter where the batch dimension was, .grad_samples will *always* put it in the first dim
-        if batch_dim != 0:
-            activations = [
-                t.permute([batch_dim] + [x for x in range(t.dim()) if x != batch_dim])
-                for t in activations
-            ]
-            backprops = backprops.permute(
-                [batch_dim] + [x for x in range(backprops.dim()) if x != batch_dim]
-            )
-
-        return activations, backprops
-
-    @classmethod
-    def validate(
-        cls, module: nn.Module, *, strict: bool = False
-    ) -> List[UnsupportedModuleError]:
-        """
-        Check if per sample gradients can be fully computed for a given model
-
-        Args:
-            module: nn.Module to be checked
-            strict: If True, raise error if module has buffers
-
-        Returns:
-            Empty list if validation is successful.
-            List of validation errors if unsupported modules are found.
-
-        Raises:
-            UnsupportedModuleError
-                If ``strict=True`` and unsupported modules are found
-        """
-        errors = []
-        errors.extend(
-            [
-                UnsupportedModuleError(
-                    f"Model contains a trainable layer with buffers "
-                    f"that Opacus doesn't currently support ({m_name}:{m}). "
-                )
-                for m_name, m in trainable_modules(module)
-                # With functorch, all modules are trainable
-                # We still want to avoid modules that have buffers (e.g. BatchNorm)
-                # as the buffers are not private
-                if len(list(m.buffers())) > 0
-            ]
-        )
-        # raise or return errors as needed
-        if strict and len(errors) > 0:
-            raise UnsupportedModuleError(errors)
-        else:
-            return errors
-
-    def forbid_grad_accumulation(self):
-        self.grad_accumulation_allowed = False
-
-    def allow_grad_accumulation(self):
-        self.grad_accumulation_allowed = True
 
     def log_module_gradient_sample_mode(
         self, module: nn.Module, *, force_functorch=False, use_ghost_clipping=True

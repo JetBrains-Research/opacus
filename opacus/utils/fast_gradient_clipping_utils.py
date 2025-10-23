@@ -14,12 +14,6 @@
 # limitations under the License.
 
 import torch
-from opacus.grad_sample.grad_sample_controller_fast_gradient_clipping import (
-    GradSampleControllerFastGradientClipping,
-)
-from opacus.grad_sample.grad_sample_module_fast_gradient_clipping import (
-    GradSampleModuleFastGradientClipping,
-)
 from opacus.optimizers import DPOptimizerFastGradientClipping
 
 

@@ -27,8 +27,6 @@ from itertools import chain
 from typing import IO, Any, BinaryIO, Dict, List, Optional, Tuple, Union
 
 import torch
-from torch.nn import Module
-
 from opacus import GradSampleController
 from opacus.accountants import create_accountant
 from opacus.accountants.utils import get_noise_multiplier
@@ -38,13 +36,14 @@ from opacus.grad_sample import GradSampleController
 from opacus.grad_sample.grad_sample_controller_fast_gradient_clipping import (
     GradSampleControllerFastGradientClipping,
 )
-from opacus.utils.fast_gradient_clipping_utils import DPLossFastGradientClipping
 from opacus.grad_sample.utils import wrap_model_in_controller
 from opacus.optimizers import DPOptimizer, get_optimizer_class
 from opacus.schedulers import _GradClipScheduler, _NoiseScheduler
+from opacus.utils.fast_gradient_clipping_utils import DPLossFastGradientClipping
 from opacus.validators.module_validator import ModuleValidator
 from torch import nn, optim
 from torch.distributed._composable.fsdp import FSDPModule
+from torch.nn import Module
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
@@ -227,7 +226,9 @@ class PrivacyEngineGradSampleController:
 
         Prepare the DP loss class, which packages the two backward passes for fast gradient clipping.
         """
-        return DPLossFastGradientClipping(controller, optimizer, criterion, loss_reduction)
+        return DPLossFastGradientClipping(
+            controller, optimizer, criterion, loss_reduction
+        )
 
     def is_compatible(
         self,
@@ -315,7 +316,8 @@ class PrivacyEngineGradSampleController:
         ],
         Tuple[Module, DPOptimizer, DPLossFastGradientClipping, DataLoader],
         Tuple[GradSampleController, DPOptimizer, DataLoader],
-        Tuple[Module, DPOptimizer, DataLoader]]:
+        Tuple[Module, DPOptimizer, DataLoader],
+    ]:
         """
           Add privacy-related responsibilities to the main PyTorch training objects:
           model, optimizer, and the data loader.
@@ -475,6 +477,7 @@ class PrivacyEngineGradSampleController:
         *,
         module: nn.Module,
         optimizer: optim.Optimizer,
+        criterion: nn.Module = nn.CrossEntropyLoss(),
         data_loader: DataLoader,
         target_epsilon: float,
         target_delta: float,
@@ -491,12 +494,12 @@ class PrivacyEngineGradSampleController:
         return_controller: bool = False,
         **kwargs,
     ) -> Union[
-        Tuple[nn.Module, DPOptimizer, DataLoader],
         Tuple[
-            Union[GradSampleController, GradSampleControllerFastGradientClipping],
-            DPOptimizer,
-            DataLoader,
+            GradSampleController, DPOptimizer, DPLossFastGradientClipping, DataLoader
         ],
+        Tuple[Module, DPOptimizer, DPLossFastGradientClipping, DataLoader],
+        Tuple[GradSampleController, DPOptimizer, DataLoader],
+        Tuple[Module, DPOptimizer, DataLoader],
     ]:
         """
         Version of :meth:`~opacus.privacy_engine_gsc.PrivacyEngine.make_private`,
@@ -508,6 +511,7 @@ class PrivacyEngineGradSampleController:
         Args:
             module: PyTorch module to be used for training
             optimizer: Optimizer to be used for training
+            criterion: Loss function to be used for training
             data_loader: DataLoader to be used for training
             target_epsilon: Target epsilon to be achieved, a metric of privacy loss at differential changes in data.
             target_delta: Target delta to be achieved. Probability of information being leaked.
@@ -573,6 +577,7 @@ class PrivacyEngineGradSampleController:
         return self.make_private(
             module=module,
             optimizer=optimizer,
+            criterion=criterion,
             data_loader=data_loader,
             noise_multiplier=get_noise_multiplier(
                 target_epsilon=target_epsilon,

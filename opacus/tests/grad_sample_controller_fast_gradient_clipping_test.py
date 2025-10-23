@@ -92,7 +92,9 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         # Forward and backward pass
         model.train()
         output = model(x)
-        loss = nn.functional.cross_entropy(output, target, reduction=self.loss_reduction)
+        loss = nn.functional.cross_entropy(
+            output, target, reduction=self.loss_reduction
+        )
         loss.backward()
 
         # Check that norm samples are computed
@@ -123,7 +125,9 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         # Forward and backward pass
         model.train()
         output = model(x)
-        loss = nn.functional.cross_entropy(output, target, reduction=self.loss_reduction)
+        loss = nn.functional.cross_entropy(
+            output, target, reduction=self.loss_reduction
+        )
         loss.backward()
 
         # Get clipping coefficient
@@ -274,8 +278,10 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
 
     def test_dp_tensor_arithmetic_operations(self):
         """Test that DPTensorFastGradientClipping supports arithmetic operations"""
-        from opacus.utils.fast_gradient_clipping_utils import DPTensorFastGradientClipping
         from opacus.optimizers import DPOptimizerFastGradientClipping
+        from opacus.utils.fast_gradient_clipping_utils import (
+            DPTensorFastGradientClipping,
+        )
 
         model = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
         optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
