@@ -16,20 +16,39 @@
 """
 Tests for grad samplers with Tensor Parallelism support.
 
-This test suite covers two scenarios:
+This test suite validates differential privacy with tensor parallelism across three scenarios:
 
-1. **Real TP tests**: Linear layers with actual tensor parallelism sharding
+1. **Real TP tests**: Layers with actual tensor parallelism sharding
    (ColwiseParallel/RowwiseParallel) to verify grad_sample computation works
    correctly with DTensor sharding.
 
-2. **TP environment compatibility tests**: Layer types that cannot be effectively
+2. **Loss Parallel tests**: Full language models where outputs remain as DTensors
+   through to the loss function, enabling efficient sharded cross-entropy computation
+   without gathering full logits. See test_language_model_loss_parallel.
+
+3. **TP environment compatibility tests**: Layer types that cannot be effectively
    sharded but need to work in a TP environment. These tests verify that the
    `implicit_replication()` context manager handles mixed Tensor/DTensor operations
    correctly when gradients flow through unsharded layers in a TP model.
 
-Note: Conv, Embedding, normalization layers, and complex layers (LSTM, Attention)
-cannot be effectively sharded due to dimension constraints, but must still work
-when other parts of the model use TP.
+What CAN be sharded (validated in tests):
+- **Linear layers**: ColwiseParallel and RowwiseParallel work perfectly (test_linear_tp)
+- **Transformer attention**: When decomposed into separate Q/K/V/O Linear layers
+  (like LLaMA), all projections can be sharded (test_transformer_attention_tp).
+  Standard pattern: Q/K/V ColwiseParallel, O/down RowwiseParallel.
+- **Embedding**: RowwiseParallel (vocabulary sharding) works (test_embedding_tp).
+  Grad sampler converts global token indices to local indices and creates properly
+  placed DTensor grad_samples with Shard(1) on vocab dimension.
+- **Output projection + Loss Parallel**: ColwiseParallel with use_local_output=False
+  keeps outputs as DTensors for sharded cross-entropy (test_language_model_loss_parallel).
+
+What CANNOT be sharded:
+- **LayerNorm/RMSNorm**: Parameters must remain replicated. Work in TP environment
+  via implicit_replication() but cannot be sharded themselves.
+- **Conv2d**: No viable sharding patterns (spatial dimensions incompatible with TP).
+- **LSTM/GRU**: Complex recurrent state cannot be effectively sharded.
+- **nn.MultiheadAttention**: Uses fused operations. Use decomposed attention instead
+  (separate Linear layers for Q/K/V/O) if TP sharding is needed.
 """
 
 import os
@@ -204,13 +223,14 @@ class RMSNormModule(nn.Module):
 class EmbeddingModule(nn.Module):
     """Module with Embedding and Linear layers for TP testing.
 
-    Note: While PyTorch's TP API supports sharding Embeddings (ColwiseParallel/
-    RowwiseParallel), the Opacus Embedding grad sampler uses scatter_add_ operations
-    which don't have DTensor sharding strategies. This is a fundamental limitation:
-    scatter operations are incompatible with DTensor sharding.
+    The Embedding layer CAN be sharded with RowwiseParallel (vocabulary sharding).
+    The grad sampler has been updated to handle:
+    - Vocab-sharded embeddings (RowwiseParallel)
+    - Converting global token indices to local vocab indices
+    - Creating proper DTensor grad_samples with Shard(1) placement
 
-    This module keeps Embedding replicated and shards only the Linear layer to test
-    implicit_replication when gradients flow through unsharded Embedding.
+    This module tests RowwiseParallel embedding sharding, matching the pattern from
+    PyTorch TP tutorial documentation.
     """
 
     def __init__(self, vocab_size=100, embedding_dim=32, output_size=10):
@@ -221,7 +241,9 @@ class EmbeddingModule(nn.Module):
     def forward(self, x):
         x = self.embedding(x)
         # Average over sequence dimension
+        # Note: mean() works correctly with sequence-sharded tensors (Shard(1))
         x = x.mean(dim=1)
+        # After mean, shape is [batch, embedding_dim] - sequence dim is gone
         return self.fc(x)
 
 
@@ -260,12 +282,164 @@ class MultiheadAttentionModule(nn.Module):
         return self.fc(pooled)
 
 
+class TransformerAttentionModule(nn.Module):
+    """Module mimicking LLaMA-style attention with separate Q/K/V/O Linear layers.
+
+    This tests the same pattern used in examples/tensor_parallelism_llama_controller.py
+    where attention is decomposed into individual Linear layers (not nn.MultiheadAttention).
+
+    Note: We can't use nn.TransformerEncoderLayer because it uses nn.MultiheadAttention
+    which has fused operations that cannot be sharded. Real transformer models like LLaMA
+    use separate Linear layers for Q/K/V/O projections, which is what we test here.
+    """
+
+    def __init__(self, embed_dim=64, num_heads=4, output_size=10):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.embed_dim = embed_dim
+
+        # Separate Q, K, V projections (like LLaMA)
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.o_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        # MLP layers (like LLaMA)
+        self.gate_proj = nn.Linear(embed_dim, embed_dim * 2, bias=False)
+        self.up_proj = nn.Linear(embed_dim, embed_dim * 2, bias=False)
+        self.down_proj = nn.Linear(embed_dim * 2, embed_dim, bias=False)
+
+        # Output projection
+        self.fc_out = nn.Linear(embed_dim, output_size, bias=False)
+
+    def forward(self, x):
+        # x shape: (batch, seq_len, embed_dim)
+        batch_size, seq_len, _ = x.shape
+
+        # Q, K, V projections (note: output may be sharded if ColwiseParallel)
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        # Get actual output dim (may be sharded)
+        actual_dim = q.shape[-1]
+        actual_heads = self.num_heads  # Heads stay the same
+        actual_head_dim = actual_dim // actual_heads
+
+        # Reshape for multi-head attention
+        q = q.view(batch_size, seq_len, actual_heads, actual_head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, actual_heads, actual_head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, actual_heads, actual_head_dim).transpose(1, 2)
+
+        # Attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1)) / (actual_head_dim ** 0.5)
+        attn_weights = F.softmax(scores, dim=-1)
+
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)
+
+        # Reshape back
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, actual_dim)
+
+        # Output projection (RowwiseParallel will handle dimension correctly)
+        attn_output = self.o_proj(attn_output)
+
+        # MLP (like LLaMA) - gate_proj and up_proj outputs may be sharded
+        gate_out = self.gate_proj(attn_output)
+        up_out = self.up_proj(attn_output)
+        mlp_out = self.down_proj(F.silu(gate_out) * up_out)
+
+        # Take mean over sequence dimension and final projection
+        pooled = (attn_output + mlp_out).mean(dim=1)
+        return self.fc_out(pooled)
+
+
+class LanguageModelModule(nn.Module):
+    """Language model with embedding, transformer, and output projection for Loss Parallel testing.
+
+    This module mimics a real language model where:
+    - Embedding can be sharded with RowwiseParallel
+    - Transformer layers use separate Q/K/V/O projections
+    - Output projection stays as DTensor for sharded loss computation (Loss Parallel)
+
+    This tests the pattern where model outputs remain sharded through to the loss function,
+    which is the critical case for efficient large vocabulary language models.
+    """
+
+    def __init__(self, vocab_size=100, embed_dim=64, num_heads=4, seq_len=8):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
+        # Embedding layer (will be sharded with RowwiseParallel)
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+
+        # Single transformer layer
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.o_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        self.gate_proj = nn.Linear(embed_dim, embed_dim * 2, bias=False)
+        self.up_proj = nn.Linear(embed_dim, embed_dim * 2, bias=False)
+        self.down_proj = nn.Linear(embed_dim * 2, embed_dim, bias=False)
+
+        # Output projection to vocabulary (will be sharded with ColwiseParallel)
+        # Output stays as DTensor for Loss Parallel
+        self.output = nn.Linear(embed_dim, vocab_size, bias=False)
+
+    def forward(self, input_ids):
+        # input_ids: [batch, seq_len] with token indices
+        x = self.embedding(input_ids)  # [batch, seq_len, embed_dim]
+
+        # Transformer attention
+        batch_size, seq_len, _ = x.shape
+
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        # Handle potentially sharded dimensions
+        actual_dim = q.shape[-1]
+        actual_heads = self.num_heads
+        actual_head_dim = actual_dim // actual_heads
+
+        # Reshape for multi-head attention
+        q = q.view(batch_size, seq_len, actual_heads, actual_head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, actual_heads, actual_head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, actual_heads, actual_head_dim).transpose(1, 2)
+
+        # Scaled dot-product attention
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) / (actual_head_dim ** 0.5)
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_output = torch.matmul(attn_weights, v)
+
+        # Reshape back
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, actual_dim)
+        attn_output = self.o_proj(attn_output)
+
+        # MLP
+        gate_out = self.gate_proj(attn_output)
+        up_out = self.up_proj(attn_output)
+        mlp_out = self.down_proj(F.silu(gate_out) * up_out)
+
+        # Residual connection
+        x = attn_output + mlp_out
+
+        # Output projection - stays as DTensor for Loss Parallel
+        logits = self.output(x)  # [batch, seq_len, vocab_size]
+
+        return logits
+
+
 # ============================================================================
 # Test Helper Functions
 # ============================================================================
 
 
-def run_grad_sample_test(rank, world_size, module_class, input_generator, tp_plan):
+def run_grad_sample_test(rank, world_size, module_class, input_generator, tp_plan, use_loss_parallel=False):
     """
     Generic test runner for grad sampler with TP.
 
@@ -275,6 +449,7 @@ def run_grad_sample_test(rank, world_size, module_class, input_generator, tp_pla
         module_class: Module class to test
         input_generator: Function that takes device and returns (input, target) tensors
         tp_plan: Tensor parallelism plan dict for parallelize_module
+        use_loss_parallel: If True, use loss_parallel context for sharded loss computation
     """
     setup(rank, world_size)
     torch.cuda.set_device(rank)
@@ -309,15 +484,33 @@ def run_grad_sample_test(rank, world_size, module_class, input_generator, tp_pla
             # For regression, reshape target to match output
             target = torch.randn_like(output).to(device)
 
-    # Compute loss
-    if target.dim() == 1 and target.dtype in [torch.int32, torch.int64]:
-        # Classification loss
-        criterion = nn.CrossEntropyLoss(reduction="mean")
-        loss = criterion(output, target)
+    # Compute loss - with or without Loss Parallel
+    if use_loss_parallel:
+        from torch.distributed.tensor.parallel import loss_parallel
+        from torch.distributed._tensor import DTensor, distribute_tensor
+        from torch.distributed._tensor.placement_types import Replicate as ReplicatePlacement
+
+        # Convert target to DTensor if needed for loss_parallel
+        if not isinstance(target, DTensor):
+            target = distribute_tensor(target, device_mesh=tp_mesh, placements=[ReplicatePlacement()])
+
+        with loss_parallel():
+            if target.dim() == 1 and target.dtype in [torch.int32, torch.int64]:
+                # Classification loss
+                loss = F.cross_entropy(output, target, reduction="mean")
+            else:
+                # Regression loss
+                loss = F.mse_loss(output, target, reduction="mean")
     else:
-        # Regression loss
-        criterion = nn.MSELoss(reduction="mean")
-        loss = criterion(output, target)
+        # Regular loss (outputs are local tensors)
+        if target.dim() == 1 and target.dtype in [torch.int32, torch.int64]:
+            # Classification loss
+            criterion = nn.CrossEntropyLoss(reduction="mean")
+            loss = criterion(output, target)
+        else:
+            # Regression loss
+            criterion = nn.MSELoss(reduction="mean")
+            loss = criterion(output, target)
 
     # Backward pass
     loss.backward()
@@ -514,13 +707,16 @@ def run_test_rmsnorm_tp(rank, world_size):
 
 
 def run_test_embedding_tp(rank, world_size):
-    """Test Embedding with sharded Linear layer tests implicit_replication.
+    """Test Embedding with RowwiseParallel (shard vocabulary dimension).
 
-    Note: Embedding layers cannot be sharded due to scatter_add_ operations lacking
-    DTensor sharding strategies. This test keeps Embedding replicated and shards the
-    Linear layer, testing that gradients flow correctly through unsharded Embedding
-    when mixed with sharded Linear.
+    This tests the pattern from PyTorch TP tutorial where Embedding is sharded with
+    RowwiseParallel on the vocabulary dimension. The embedding grad sampler correctly
+    handles:
+    - Converting global token indices to local vocab shard indices
+    - Masking gradients to only include tokens in the local vocab range
+    - Creating DTensor grad_sample with Shard(1) placement (vocab dimension)
     """
+    from torch.distributed.tensor.parallel.style import Replicate
 
     def input_generator(device):
         batch_size = 4
@@ -532,9 +728,13 @@ def run_test_embedding_tp(rank, world_size):
         target = torch.randn(batch_size, output_size).to(device)
         return input_data, target
 
-    # Shard the Linear layer while Embedding remains replicated
-    # Embedding sharding is blocked by scatter_add_ not having DTensor sharding strategies
+    # Shard Embedding vocabulary (RowwiseParallel)
+    # Output is gathered (Replicate) for compatibility with non-TP layers
     tp_plan = {
+        "embedding": RowwiseParallel(
+            input_layouts=Replicate(),
+            # output_layouts defaults to Replicate() - gather results
+        ),
         "fc": ColwiseParallel(),
     }
 
@@ -599,6 +799,136 @@ def run_test_multihead_attention_tp(rank, world_size):
     )
 
 
+def run_test_transformer_attention_tp(rank, world_size):
+    """Test transformer attention block with sharded Q/K/V/O and MLP projections.
+
+    This tests the LLaMA-style attention pattern where Q/K/V/O are separate Linear
+    layers that can be individually sharded (ColwiseParallel for Q/K/V, RowwiseParallel
+    for O), plus gate/up/down MLP projections following the same pattern.
+    """
+
+    def input_generator(device):
+        batch_size = 4
+        seq_len = 8
+        embed_dim = 64
+        output_size = 10
+        # Generate random sequential data
+        input_data = torch.randn(batch_size, seq_len, embed_dim).to(device)
+        target = torch.randn(batch_size, output_size).to(device)
+        return input_data, target
+
+    # Shard Q/K/V/O and MLP projections like LLaMA
+    tp_plan = {
+        # Attention projections - standard TP pattern
+        "q_proj": ColwiseParallel(),
+        "k_proj": ColwiseParallel(),
+        "v_proj": ColwiseParallel(),
+        "o_proj": RowwiseParallel(),
+        # MLP layers - standard TP pattern
+        "gate_proj": ColwiseParallel(),
+        "up_proj": ColwiseParallel(),
+        "down_proj": RowwiseParallel(),
+        # Output projection
+        "fc_out": ColwiseParallel(),
+    }
+
+    return run_grad_sample_test(
+        rank, world_size, TransformerAttentionModule, input_generator, tp_plan
+    )
+
+
+def run_test_language_model_loss_parallel(rank, world_size):
+    """Test language model with Loss Parallel - sharded loss computation.
+
+    This tests the critical pattern for efficient large vocabulary language models:
+    - Embedding: RowwiseParallel (vocab sharding)
+    - Transformer: Q/K/V ColwiseParallel, O/down RowwiseParallel
+    - Output projection: ColwiseParallel with use_local_output=False
+    - Loss: Computed on sharded DTensor outputs using loss_parallel context
+
+    The key difference from other tests: outputs stay as DTensors through to loss,
+    enabling efficient sharded cross-entropy computation without gathering full logits.
+    """
+    from torch.distributed.tensor.parallel import loss_parallel
+    from torch.distributed.tensor.parallel.style import Replicate
+
+    setup(rank, world_size)
+
+    batch_size = 4
+    seq_len = 8
+    vocab_size = 100
+    embed_dim = 64
+
+    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(device)
+
+    # Create input data - token indices
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len)).to(device)
+    # Labels for next-token prediction (needs to be DTensor for loss_parallel)
+    labels = torch.randint(0, vocab_size, (batch_size, seq_len)).to(device)
+
+    # Convert labels to replicated DTensor for loss_parallel
+    from torch.distributed._tensor import distribute_tensor
+    from torch.distributed._tensor.placement_types import Replicate as ReplicatePlacement
+
+    # Create model
+    model = LanguageModelModule(vocab_size=vocab_size, embed_dim=embed_dim, seq_len=seq_len)
+    model = model.to(device)
+
+    # Parallelize with Loss Parallel pattern
+    tp_mesh = init_device_mesh("cuda", (world_size,))
+
+    tp_plan = {
+        # Embedding: RowwiseParallel with vocab sharding
+        "embedding": RowwiseParallel(
+            input_layouts=Replicate(),
+        ),
+        # Transformer attention
+        "q_proj": ColwiseParallel(),
+        "k_proj": ColwiseParallel(),
+        "v_proj": ColwiseParallel(),
+        "o_proj": RowwiseParallel(),
+        # MLP
+        "gate_proj": ColwiseParallel(),
+        "up_proj": ColwiseParallel(),
+        "down_proj": RowwiseParallel(),
+        # Output projection: ColwiseParallel, keep as DTensor for Loss Parallel
+        "output": ColwiseParallel(use_local_output=False),
+    }
+
+    parallelize_module(model, tp_mesh, tp_plan)
+
+    # Convert labels to replicated DTensor
+    labels = distribute_tensor(labels, device_mesh=tp_mesh, placements=[ReplicatePlacement()])
+
+    # Setup privacy engine - hooks capture activations and backprops
+    controller = GradSampleControllerTP(model)
+
+    # Forward pass with hooks enabled to capture activations
+    # logits stay as DTensor for Loss Parallel
+    logits = model(input_ids)  # [batch, seq_len, vocab_size] DTensor
+
+    # Compute loss with loss_parallel context
+    # This enables sharded cross-entropy without gathering full logits
+    with loss_parallel():
+        loss = F.cross_entropy(
+            logits.view(-1, vocab_size),
+            labels.view(-1),
+            reduction="mean"
+        )
+
+    # Backward pass - hooks will compute grad_samples
+    loss.backward()
+
+    # Check grad_samples were computed
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            assert hasattr(param, "grad_sample"), f"grad_sample missing for {name}"
+            print(f"[Rank {rank}] {name}: grad_sample shape = {param.grad_sample.shape}")
+
+    cleanup()
+
+
 # ============================================================================
 # Test Cases
 # ============================================================================
@@ -607,18 +937,25 @@ def run_test_multihead_attention_tp(rank, world_size):
 class GradSamplersTPTest(unittest.TestCase):
     """Test cases for grad samplers with Tensor Parallelism.
 
-    This test suite is organized into two categories:
+    This test suite is organized into three categories:
 
-    1. Real TP tests (test_linear_tp only):
-       - Tests actual tensor parallelism with sharded layers
-       - Verifies grad_sample computation works with DTensor sharding
-       - Linear: ColwiseParallel + RowwiseParallel
+    1. **Real TP tests**: Layers with actual tensor parallelism sharding
+       - test_linear_tp: ColwiseParallel + RowwiseParallel
+       - test_transformer_attention_tp: Sharded Q/K/V/O + MLP (LLaMA pattern)
+       - test_embedding_tp: RowwiseParallel vocabulary sharding
 
-    2. TP environment compatibility tests (all other tests):
-       - Tests layers that cannot be effectively sharded
-       - Verifies implicit_replication() handles mixed Tensor/DTensor operations
-       - Ensures these layers work when used alongside TP-sharded layers
-       - Note: Embedding cannot be sharded due to scatter_add_ lacking DTensor strategies
+    2. **Loss Parallel tests**: Full language models with sharded loss computation
+       - test_language_model_loss_parallel: Validates end-to-end language modeling
+         with sharded embedding, transformer layers, output projection, and loss.
+         Outputs remain as DTensors through to loss_parallel() context for efficient
+         sharded cross-entropy without gathering full logits.
+
+    3. **TP environment compatibility tests**: Layers that cannot be sharded but work
+       in TP environment via implicit_replication():
+       - test_conv2d_tp, test_layernorm_tp, test_groupnorm_tp, test_instancenorm_tp,
+         test_rmsnorm_tp, test_lstm_tp, test_multihead_attention_tp
+       - These verify mixed Tensor/DTensor operations work correctly when unsharded
+         layers are used alongside TP-sharded layers.
     """
 
     # ========================================================================
@@ -633,6 +970,39 @@ class GradSamplersTPTest(unittest.TestCase):
         world_size = 2
         mp.spawn(run_test_linear_tp, args=(world_size,), nprocs=world_size, join=True)
 
+    @unittest.skipIf(
+        torch.cuda.device_count() < 2, "Requires at least 2 GPUs to run TP tests"
+    )
+    def test_transformer_attention_tp(self):
+        """Test transformer attention with sharded Q/K/V/O and MLP projections (LLaMA pattern)."""
+        world_size = 2
+        mp.spawn(run_test_transformer_attention_tp, args=(world_size,), nprocs=world_size, join=True)
+
+    @unittest.skipIf(
+        torch.cuda.device_count() < 2, "Requires at least 2 GPUs to run TP tests"
+    )
+    def test_embedding_tp(self):
+        """Test Embedding with RowwiseParallel vocabulary sharding."""
+        world_size = 2
+        mp.spawn(run_test_embedding_tp, args=(world_size,), nprocs=world_size, join=True)
+
+    # ========================================================================
+    # Loss Parallel Tests - End-to-end language modeling with sharded loss
+    # ========================================================================
+
+    @unittest.skipIf(
+        torch.cuda.device_count() < 2, "Requires at least 2 GPUs to run TP tests"
+    )
+    def test_language_model_loss_parallel(self):
+        """Test language model with Loss Parallel - sharded loss computation with DTensor outputs."""
+        world_size = 2
+        mp.spawn(
+            run_test_language_model_loss_parallel,
+            args=(world_size,),
+            nprocs=world_size,
+            join=True,
+        )
+
     # ========================================================================
     # TP Environment Compatibility Tests - Testing implicit_replication
     # ========================================================================
@@ -644,16 +1014,6 @@ class GradSamplersTPTest(unittest.TestCase):
         """Test Conv2d grad sampler works in TP environment via implicit_replication."""
         world_size = 2
         mp.spawn(run_test_conv2d_tp, args=(world_size,), nprocs=world_size, join=True)
-
-    @unittest.skipIf(
-        torch.cuda.device_count() < 2, "Requires at least 2 GPUs to run TP tests"
-    )
-    def test_embedding_tp(self):
-        """Test Embedding grad sampler works in TP environment via implicit_replication."""
-        world_size = 2
-        mp.spawn(
-            run_test_embedding_tp, args=(world_size,), nprocs=world_size, join=True
-        )
 
     @unittest.skipIf(
         torch.cuda.device_count() < 2, "Requires at least 2 GPUs to run TP tests"

@@ -17,7 +17,16 @@
 LLaMA example demonstrating GradSampleControllerTP with tensor parallelism.
 
 This example trains a full LLaMA model with tensor parallelism and differential privacy.
-All grad samplers (Linear, Embedding, LayerNorm, etc.) now support TP with implicit_replication.
+The model is sharded across GPUs using:
+- Attention Q/K/V projections: ColwiseParallel
+- Attention O projection: RowwiseParallel
+- MLP gate/up projections: ColwiseParallel
+- MLP down projection: RowwiseParallel
+
+Note: Embedding layers are kept replicated for compatibility with the LLaMA architecture.
+Embedding sharding (RowwiseParallel) is supported and tested in simpler models.
+
+All grad samplers (Linear, Embedding, LayerNorm, etc.) support TP with implicit_replication.
 """
 
 import logging
@@ -109,6 +118,11 @@ def model_parallel(rank, world_size):
     # Define the tensor parallelization plan
     tp_mesh = init_device_mesh("cuda", (world_size,))
 
+    # Note: Embedding sharding is supported in simple models but has issues with
+    # complex models like LLaMA when used with transformers. For now, keep embedding replicated.
+    # TODO: Investigate why RowwiseParallel(input_layouts=Replicate()) on embed_tokens
+    # causes scatter_add_ DTensor dispatch issues.
+
     # Parallelize each transformer layer - now training full model!
     # All grad samplers (Linear, Embedding, LayerNorm) support TP
     for layer_id, transformer_block in enumerate(llama_model.model.layers):
@@ -175,10 +189,6 @@ def model_parallel(rank, world_size):
     print(f"[Rank {rank}] Backward pass, memory usage:")
     profile_mem(loss.backward)
     print(f"[Rank {rank}] Backward pass complete")
-
-    # Get per-sample norms from controller
-    per_sample_norms = controller.get_per_sample_norms()
-    print(f"[Rank {rank}] Per-sample norms: {per_sample_norms}")
 
     # Optimizer step
     print(f"[Rank {rank}] Optimizer step, memory usage:")
