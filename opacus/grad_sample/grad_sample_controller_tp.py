@@ -95,10 +95,6 @@ class GradSampleControllerTP(GradSampleController):
             force_functorch=force_functorch,
         )
         self.set_pattern_param_sample_norm_sum()
-        warnings.warn(
-            "Opacus TP support is currently in beta. "
-            "Custom model output placements may cause unexpected behavior."
-        )
 
     def set_pattern_param_sample_norm_sum(self):
         """

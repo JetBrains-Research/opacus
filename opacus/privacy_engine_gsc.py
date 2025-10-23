@@ -402,11 +402,6 @@ class PrivacyEngineGradSampleController:
 
         # Auto-detect tensor parallelism
         tensor_parallel = self._has_dtensor_parameters(module)
-        if tensor_parallel:
-            warnings.warn(
-                "Auto-detected DTensor parameters in model. "
-                "Automatically using tensor parallelism-aware controller (GradSampleControllerTP)."
-            )
 
         # Prepare model (attach hooks directly, no wrapping)
         controller = self._prepare_model(
