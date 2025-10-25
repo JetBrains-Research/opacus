@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """
-LLaMA example demonstrating GradSampleControllerTP with tensor parallelism.
+LLaMA example demonstrating GradSampleControllerTP with tensor parallelism and Loss Parallel.
 
 This example trains a full LLaMA model with tensor parallelism and differential privacy.
 The model is sharded across GPUs using:
@@ -22,6 +22,10 @@ The model is sharded across GPUs using:
 - Attention O projection: RowwiseParallel
 - MLP gate/up projections: ColwiseParallel
 - MLP down projection: RowwiseParallel
+- Output projection (lm_head): ColwiseParallel with use_local_output=False for Loss Parallel
+
+Loss Parallel enables efficient sharded cross-entropy computation without gathering all model
+outputs to every GPU, significantly reducing memory consumption and communication overhead.
 
 Note: Embedding layers are kept replicated for compatibility with the LLaMA architecture.
 Embedding sharding (RowwiseParallel) is supported and tested in simpler models.
@@ -36,10 +40,13 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from opacus.privacy_engine_gsc import PrivacyEngineGradSampleController
+from torch.distributed._tensor import distribute_tensor
+from torch.distributed._tensor.placement_types import Replicate as ReplicatePlacement
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     RowwiseParallel,
+    loss_parallel,
     parallelize_module,
 )
 from transformers import LlamaConfig, LlamaForCausalLM
@@ -145,6 +152,21 @@ def model_parallel(rank, world_size):
             parallelize_plan=layer_tp_plan,
         )
 
+    # Parallelize lm_head with Loss Parallel pattern
+    # ColwiseParallel with use_local_output=False keeps output as DTensor for sharded loss
+    # IMPORTANT: This must be done BEFORE make_private() so TP is auto-detected
+    from torch.distributed._tensor import Replicate
+    parallelize_module(
+        module=llama_model,
+        device_mesh=tp_mesh,
+        parallelize_plan={
+            "lm_head": ColwiseParallel(
+                input_layouts=Replicate(),
+                use_local_output=False,
+            ),
+        },
+    )
+
     m2_max_mem = torch.cuda.max_memory_allocated() / 2**20
     m2 = torch.cuda.memory_allocated() / 2**20
     print(
@@ -152,6 +174,12 @@ def model_parallel(rank, world_size):
     )
 
     print(f"[Rank {rank}] Model parallelized (full model training, no LoRA!)")
+
+    # Check if DTensor parameters exist
+    dtensor_params = [name for name, param in llama_model.named_parameters() if isinstance(param, torch.distributed.tensor.DTensor)]
+    print(f"[Rank {rank}] DTensor parameters: {len(dtensor_params)} found")
+    if len(dtensor_params) > 0 and rank == 0:
+        print(f"[Rank {rank}] First few DTensor params: {dtensor_params[:5]}")
 
     # Create optimizer - disable foreach to avoid mixed DTensor/Tensor issues
     optimizer = torch.optim.SGD(llama_model.parameters(), lr=0.01, foreach=False)
@@ -161,7 +189,12 @@ def model_parallel(rank, world_size):
     dummy_loader = torch.utils.data.DataLoader(dummy_dataset, batch_size=BATCH_SIZE)
 
     # Setup privacy engine with TP-aware controller
+    # TP will be auto-detected from DTensor parameters (including lm_head parallelized above)
     privacy_engine = PrivacyEngineGradSampleController()
+
+    # Manually check TP detection
+    has_dtensor = privacy_engine._has_dtensor_parameters(llama_model)
+    print(f"[Rank {rank}] TP auto-detection result: {has_dtensor}")
 
     # Make model private - TP will be auto-detected from DTensor parameters
     controller, optimizer, _ = privacy_engine.make_private(
@@ -175,19 +208,29 @@ def model_parallel(rank, world_size):
     )
 
     print(f"[Rank {rank}] Privacy engine configured")
+    print(f"[Rank {rank}] Optimizer type: {type(optimizer).__name__}")
 
     # Forward pass
     print(f"[Rank {rank}] Forward pass, memory usage:")
     output, _ = profile_mem(lambda: llama_model(input_ids))
 
-    # Compute loss
-    loss_fn = torch.nn.CrossEntropyLoss()
-    loss = loss_fn(output.logits.view(-1, EMBEDDING_LENGTH), labels.view(-1))
-    print(f"[Rank {rank}] Loss: {loss.item():.4f}")
+    # Convert labels to DTensor for loss_parallel
+    labels_dtensor = distribute_tensor(labels, device_mesh=tp_mesh, placements=[ReplicatePlacement()])
 
-    # Backward pass
-    print(f"[Rank {rank}] Backward pass, memory usage:")
-    profile_mem(loss.backward)
+    # Compute loss with loss_parallel context for sharded cross-entropy
+    # output.logits is DTensor with shape [batch, seq, vocab] sharded on vocab dimension
+    # Both loss computation and backward pass must be within the same loss_parallel context
+    with loss_parallel():
+        loss = torch.nn.functional.cross_entropy(
+            output.logits.view(-1, EMBEDDING_LENGTH),
+            labels_dtensor.view(-1),
+            reduction="mean"
+        )
+        print(f"[Rank {rank}] Loss: {loss.item():.4f}")
+
+        # Backward pass
+        print(f"[Rank {rank}] Backward pass, memory usage:")
+        profile_mem(loss.backward)
     print(f"[Rank {rank}] Backward pass complete")
 
     # Optimizer step
