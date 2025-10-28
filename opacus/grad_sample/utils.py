@@ -18,6 +18,9 @@ from typing import Sequence, Type, Union
 import torch.nn as nn
 
 from .grad_sample_controller import GradSampleController
+from .grad_sample_controller_fast_gradient_clipping import (
+    GradSampleControllerFastGradientClipping,
+)
 from .grad_sample_module import GradSampleModule
 from .grad_sample_module_fast_gradient_clipping import (
     GradSampleModuleFastGradientClipping,
@@ -55,6 +58,7 @@ def register_grad_sampler(
             GradSampleModule.GRAD_SAMPLERS[target_class] = f
             GradSampleModuleFastGradientClipping.GRAD_SAMPLERS[target_class] = f
             GradSampleController.GRAD_SAMPLERS[target_class] = f
+            GradSampleControllerFastGradientClipping.GRAD_SAMPLERS[target_class] = f
         return f
 
     return decorator
@@ -81,6 +85,7 @@ def register_norm_sampler(
         )
         for target_class in target_classes:
             GradSampleModuleFastGradientClipping.NORM_SAMPLERS[target_class] = f
+            GradSampleControllerFastGradientClipping.NORM_SAMPLERS[target_class] = f
         return f
 
     return decorator
@@ -125,9 +130,9 @@ def wrap_model_in_controller(model: nn.Module, grad_sample_mode: str, *args, **k
     return cls(model, *args, **kwargs)
 
 
-def get_gsc_class(grad_sample_mode: str) -> Type[GradSampleController]:
+def get_gsc_class(grad_sample_mode: str):
     """
-    Returns AbstractGradSampleModule subclass corresponding to the input mode.
+    Returns GradSampleController subclass corresponding to the input mode.
     See README for a detailed comparison between grad sample modes.
 
     :param grad_sample_mode:
@@ -135,8 +140,10 @@ def get_gsc_class(grad_sample_mode: str) -> Type[GradSampleController]:
     """
     if grad_sample_mode in ["hooks", "functorch"]:
         return GradSampleController
+    elif grad_sample_mode == "ghost":
+        return GradSampleControllerFastGradientClipping
     else:
         raise ValueError(
             f"Unexpected grad_sample_mode: {grad_sample_mode}. "
-            f"Allowed values: hooks, functorch"
+            f"Allowed values: hooks, functorch, ghost"
         )

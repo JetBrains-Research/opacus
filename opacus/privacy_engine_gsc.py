@@ -27,17 +27,23 @@ from itertools import chain
 from typing import IO, Any, BinaryIO, Dict, List, Optional, Tuple, Union
 
 import torch
+from opacus import GradSampleController
 from opacus.accountants import create_accountant
 from opacus.accountants.utils import get_noise_multiplier
 from opacus.data_loader import DPDataLoader, switch_generator
 from opacus.distributed import DifferentiallyPrivateDistributedDataParallel as DPDDP
 from opacus.grad_sample import GradSampleController
+from opacus.grad_sample.grad_sample_controller_fast_gradient_clipping import (
+    GradSampleControllerFastGradientClipping,
+)
 from opacus.grad_sample.utils import wrap_model_in_controller
 from opacus.optimizers import DPOptimizer, get_optimizer_class
 from opacus.schedulers import _GradClipScheduler, _NoiseScheduler
+from opacus.utils.fast_gradient_clipping_utils import DPLossFastGradientClipping
 from opacus.validators.module_validator import ModuleValidator
 from torch import nn, optim
 from torch.distributed._composable.fsdp import FSDPModule
+from torch.nn import Module
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
@@ -178,17 +184,51 @@ class PrivacyEngineGradSampleController:
         loss_reduction: str = "mean",
         strict: bool = False,
         grad_sample_mode: str = "hooks",
+        max_grad_norm: float = None,
+        use_ghost_clipping: bool = True,
     ) -> GradSampleController:
 
-        controller = wrap_model_in_controller(
-            module,
-            grad_sample_mode=grad_sample_mode,
-            batch_first=batch_first,
-            loss_reduction=loss_reduction,
-            strict=strict,
-        )
+        kwargs = {
+            "grad_sample_mode": grad_sample_mode,
+            "batch_first": batch_first,
+            "loss_reduction": loss_reduction,
+            "strict": strict,
+        }
+
+        # Add ghost clipping specific parameters
+        if grad_sample_mode == "ghost":
+            if max_grad_norm is None:
+                raise ValueError(
+                    "max_grad_norm must be provided when using ghost clipping mode"
+                )
+            kwargs["max_grad_norm"] = max_grad_norm
+            kwargs["use_ghost_clipping"] = use_ghost_clipping
+
+        controller = wrap_model_in_controller(module, **kwargs)
 
         return controller
+
+    def _prepare_criterion(
+        self,
+        *,
+        controller: GradSampleControllerFastGradientClipping,
+        optimizer: DPOptimizer,
+        criterion: nn.Module = nn.CrossEntropyLoss(),
+        loss_reduction: str = "mean",
+        **kwargs,
+    ) -> DPLossFastGradientClipping:
+        """
+        Args:
+            controller: GradSampleControllerFastGradientClipping used for training,
+            optimizer: DPOptimizer used for training,
+            criterion: Loss function used for training,
+            loss_reduction: "mean" or "sum", indicates if the loss reduction (for aggregating the gradients)
+
+        Prepare the DP loss class, which packages the two backward passes for fast gradient clipping.
+        """
+        return DPLossFastGradientClipping(
+            controller, optimizer, criterion, loss_reduction
+        )
 
     def is_compatible(
         self,
@@ -256,6 +296,7 @@ class PrivacyEngineGradSampleController:
         *,
         module: nn.Module,
         optimizer: optim.Optimizer,
+        criterion: nn.Module = nn.CrossEntropyLoss(),
         data_loader: DataLoader,
         noise_multiplier: float,
         max_grad_norm: Union[float, List[float]],
@@ -270,8 +311,12 @@ class PrivacyEngineGradSampleController:
         return_controller: bool = False,
         **kwargs,
     ) -> Union[
-        Tuple[nn.Module, DPOptimizer, DataLoader],
+        Tuple[
+            GradSampleController, DPOptimizer, DPLossFastGradientClipping, DataLoader
+        ],
+        Tuple[Module, DPOptimizer, DPLossFastGradientClipping, DataLoader],
         Tuple[GradSampleController, DPOptimizer, DataLoader],
+        Tuple[Module, DPOptimizer, DataLoader],
     ]:
         """
           Add privacy-related responsibilities to the main PyTorch training objects:
@@ -297,6 +342,7 @@ class PrivacyEngineGradSampleController:
           Args:
              module: PyTorch module to be used for training
               optimizer: Optimizer to be used for training
+              criterion: Loss function to be used for training
               data_loader: DataLoader to be used for training
               noise_multiplier: The ratio of the standard deviation of the Gaussian noise to
                   the L2-sensitivity of the function to which the noise is added
@@ -369,6 +415,7 @@ class PrivacyEngineGradSampleController:
             loss_reduction=loss_reduction,
             grad_sample_mode=grad_sample_mode,
             strict=strict,
+            max_grad_norm=max_grad_norm,
         )
         if poisson_sampling:
             controller.forbid_grad_accumulation()
@@ -406,6 +453,20 @@ class PrivacyEngineGradSampleController:
             self.accountant.get_optimizer_hook_fn(sample_rate=sample_rate)
         )
 
+        if "ghost" in grad_sample_mode:
+            criterion = self._prepare_criterion(
+                controller=controller,
+                optimizer=optimizer,
+                criterion=criterion,
+                loss_reduction=loss_reduction,
+                **kwargs,
+            )
+
+            if return_controller:
+                return controller, optimizer, criterion, data_loader
+            else:
+                return module, optimizer, criterion, data_loader
+
         if return_controller:
             return controller, optimizer, data_loader
         else:
@@ -416,6 +477,7 @@ class PrivacyEngineGradSampleController:
         *,
         module: nn.Module,
         optimizer: optim.Optimizer,
+        criterion: nn.Module = nn.CrossEntropyLoss(),
         data_loader: DataLoader,
         target_epsilon: float,
         target_delta: float,
@@ -432,8 +494,12 @@ class PrivacyEngineGradSampleController:
         return_controller: bool = False,
         **kwargs,
     ) -> Union[
-        Tuple[nn.Module, DPOptimizer, DataLoader],
+        Tuple[
+            GradSampleController, DPOptimizer, DPLossFastGradientClipping, DataLoader
+        ],
+        Tuple[Module, DPOptimizer, DPLossFastGradientClipping, DataLoader],
         Tuple[GradSampleController, DPOptimizer, DataLoader],
+        Tuple[Module, DPOptimizer, DataLoader],
     ]:
         """
         Version of :meth:`~opacus.privacy_engine_gsc.PrivacyEngine.make_private`,
@@ -445,6 +511,7 @@ class PrivacyEngineGradSampleController:
         Args:
             module: PyTorch module to be used for training
             optimizer: Optimizer to be used for training
+            criterion: Loss function to be used for training
             data_loader: DataLoader to be used for training
             target_epsilon: Target epsilon to be achieved, a metric of privacy loss at differential changes in data.
             target_delta: Target delta to be achieved. Probability of information being leaked.
@@ -510,6 +577,7 @@ class PrivacyEngineGradSampleController:
         return self.make_private(
             module=module,
             optimizer=optimizer,
+            criterion=criterion,
             data_loader=data_loader,
             noise_multiplier=get_noise_multiplier(
                 target_epsilon=target_epsilon,
