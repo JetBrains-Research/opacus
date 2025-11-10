@@ -226,7 +226,9 @@ class GradSampleModuleTest(unittest.TestCase):
         GradSampleModule(SimpleLinear(4, 2))
 
     def test_custom_module_validation(self) -> None:
-        with self.assertRaises(NotImplementedError):
+        from opacus.validators.errors import UnsupportedModuleError
+
+        with self.assertRaises(UnsupportedModuleError):
             GradSampleModule(mobilenet_v3_small())
 
     def test_submodule_access(self) -> None:

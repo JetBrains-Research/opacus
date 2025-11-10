@@ -151,16 +151,20 @@ class AbstractGradSampleModule(nn.Module, ABC):
         without an optimizer step or clearing out gradients).
 
         When set, GradSampleModule will throw a ValueError on the second backward pass.
-        :return:
+
+        Note: This is a no-op in the base class. Subclasses that support grad accumulation
+        detection (like GradSampleModule with hooks) should override this.
         """
-        pass
+        # No-op for modules that don't support grad accumulation detection
+        return
 
     def allow_grad_accumulation(self):
         """
         Unsets a flag to detect gradient accumulation (multiple forward/backward passes
         without an optimizer step or clearing out gradients).
 
-        When set, GradSampleModule will throw a ValueError on the second backward pass.
-        :return:
+        Note: This is a no-op in the base class. Subclasses that support grad accumulation
+        detection (like GradSampleModule with hooks) should override this.
         """
-        pass
+        # No-op for modules that don't support grad accumulation detection
+        return

@@ -28,6 +28,7 @@ from opacus.grad_sample import (
     get_gsm_class,
     wrap_model,
 )
+from opacus.grad_sample.grad_sample_controller import GradSampleController
 from opacus.optimizers import DPOptimizer, get_optimizer_class
 from opacus.schedulers import _GradClipScheduler, _NoiseScheduler
 from opacus.utils.fast_gradient_clipping_utils import DPLossFastGradientClipping
@@ -146,6 +147,7 @@ class PrivacyEngine:
         *,
         poisson_sampling: bool,
         distributed: bool,
+        batch_first: bool = True,
     ) -> DataLoader:
         if self.dataset is None:
             self.dataset = data_loader.dataset
@@ -161,7 +163,9 @@ class PrivacyEngine:
 
         if poisson_sampling:
             return DPDataLoader.from_data_loader(
-                data_loader, generator=self.secure_rng, distributed=distributed
+                data_loader,
+                generator=self.secure_rng,
+                distributed=distributed,
             )
         elif self.secure_mode:
             return switch_generator(data_loader=data_loader, generator=self.secure_rng)
@@ -176,47 +180,80 @@ class PrivacyEngine:
         max_grad_norm: Union[float, List[float]] = 1.0,
         loss_reduction: str = "mean",
         grad_sample_mode: str = "hooks",
-    ) -> AbstractGradSampleModule:
-        # Ideally, validation should have been taken care of by calling
-        # `get_compatible_module()`
-        self.validate(module=module, optimizer=None, data_loader=None)
+        strict: bool = False,
+        return_controller: bool = False,
+        use_ghost_clipping: bool = True,
+    ) -> Union[AbstractGradSampleModule, GradSampleController]:
+        """
+        Prepares a model for differentially private training.
 
-        # wrap
-        if isinstance(module, AbstractGradSampleModule):
-            if (
-                module.batch_first != batch_first
-                or module.loss_reduction != loss_reduction
-                or type(module) is not get_gsm_class(grad_sample_mode)
-            ):
+        Args:
+            module: PyTorch module to be prepared
+            batch_first: Flag to indicate if input has batch dimension first
+            max_grad_norm: Maximum gradient norm for clipping (required for ghost clipping)
+            loss_reduction: Loss reduction method ("mean" or "sum")
+            grad_sample_mode: Mode for computing per-sample gradients
+            strict: If True, validates module strictly
+            return_controller: If True, uses controller-based approach (no wrapping).
+                If False, wraps module in GradSampleModule.
+            use_ghost_clipping: If True and grad_sample_mode="ghost", uses ghost clipping
+
+        Returns:
+            Either GradSampleModule instance (if return_controller=False) or
+            GradSampleController instance (if return_controller=True)
+        """
+        # Validate module unless using controller-based approach
+        # (controller validates internally)
+        if not return_controller:
+            # Ideally, validation should have been taken care of by calling
+            # `get_compatible_module()`
+            self.validate(module=module, optimizer=None, data_loader=None)
+
+            # Check if already wrapped
+            if isinstance(module, AbstractGradSampleModule):
+                if (
+                    module.batch_first != batch_first
+                    or module.loss_reduction != loss_reduction
+                    or type(module) is not get_gsm_class(grad_sample_mode)
+                ):
+                    raise ValueError(
+                        f"Pre-existing GradSampleModule doesn't match new arguments. "
+                        f"Got: module.batch_first: {module.batch_first}, module.loss_reduction: {module.loss_reduction}, type(module): {type(module)} "
+                        f"Requested: batch_first:{batch_first}, loss_reduction: {loss_reduction}, grad_sample_mode: {grad_sample_mode} "
+                        f"Please pass vanilla nn.Module instead"
+                    )
+                return module
+
+        # Prepare kwargs for wrapping/controller
+        kwargs = {
+            "batch_first": batch_first,
+            "loss_reduction": loss_reduction,
+            "strict": strict,
+        }
+
+        # Add ghost clipping specific parameters
+        if grad_sample_mode in ["ghost", "ghost_fsdp"]:
+            if max_grad_norm is None:
                 raise ValueError(
-                    f"Pre-existing GradSampleModule doesn't match new arguments."
-                    f"Got: module.batch_first: {module.batch_first}, module.loss_reduction: {module.loss_reduction}, type(module): {type(module)}"
-                    f"Requested: batch_first:{batch_first}, loss_reduction: {loss_reduction}, grad_sample_mode: {grad_sample_mode} "
-                    f"Please pass vanilla nn.Module instead"
+                    "max_grad_norm must be provided when using ghost clipping mode"
                 )
+            kwargs["max_grad_norm"] = max_grad_norm
+            if return_controller:
+                # Only controllers have use_ghost_clipping parameter
+                kwargs["use_ghost_clipping"] = use_ghost_clipping
 
-            return module
-        else:
-            if grad_sample_mode in ["ghost", "ghost_fsdp"]:
-                return wrap_model(
-                    module,
-                    grad_sample_mode=grad_sample_mode,
-                    batch_first=batch_first,
-                    loss_reduction=loss_reduction,
-                    max_grad_norm=max_grad_norm,
-                )
-            else:
-                return wrap_model(
-                    module,
-                    grad_sample_mode=grad_sample_mode,
-                    batch_first=batch_first,
-                    loss_reduction=loss_reduction,
-                )
+        # Use unified wrap_model function
+        return wrap_model(
+            module,
+            grad_sample_mode=grad_sample_mode,
+            use_controller=return_controller,
+            **kwargs,
+        )
 
     def _prepare_criterion(
         self,
         *,
-        module: GradSampleModule,
+        controller_or_module: Union[GradSampleModule, GradSampleController],
         optimizer: DPOptimizer,
         criterion=nn.CrossEntropyLoss(),
         loss_reduction: str = "mean",
@@ -224,14 +261,16 @@ class PrivacyEngine:
     ) -> DPLossFastGradientClipping:
         """
         Args:
-            module: GradSampleModule used for training,
+            controller_or_module: GradSampleModule or GradSampleController used for training,
             optimizer: DPOptimizer used for training,
             criterion: Loss function used for training,
             loss_reduction: "mean" or "sum", indicates if the loss reduction (for aggregating the gradients)
 
         Prepare the DP loss class, which packages the two backward passes for fast gradient clipping.
         """
-        return DPLossFastGradientClipping(module, optimizer, criterion, loss_reduction)
+        return DPLossFastGradientClipping(
+            controller_or_module, optimizer, criterion, loss_reduction
+        )
 
     def is_compatible(
         self,
@@ -309,10 +348,14 @@ class PrivacyEngine:
         clipping: str = "flat",
         noise_generator=None,
         grad_sample_mode: str = "hooks",
+        strict: bool = True,
+        return_controller: bool = False,
         **kwargs,
     ) -> Union[
         Tuple[GradSampleModule, DPOptimizer, DataLoader],
         Tuple[GradSampleModule, DPOptimizer, DPLossFastGradientClipping, DataLoader],
+        Tuple[nn.Module, DPOptimizer, DataLoader],
+        Tuple[nn.Module, DPOptimizer, DPLossFastGradientClipping, DataLoader],
     ]:
         """
         Add privacy-related responsibilities to the main PyTorch training objects:
@@ -321,7 +364,7 @@ class PrivacyEngine:
         All of the returned objects act just like their non-private counterparts
         passed as arguments, but with added DP tasks.
 
-        - Model is wrapped to also compute per sample gradients.
+        - Model is wrapped to also compute per sample gradients (or hooks attached directly if return_controller=True).
         - Optimizer is now responsible for gradient clipping and adding noise to the gradients.
         - Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
         - DataLoader is updated to perform Poisson sampling.
@@ -362,14 +405,25 @@ class PrivacyEngine:
                 implementation class for the wrapped ``module``. See
                 :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
                 details
+            strict: If True, will raise an error if the module is incompatible with
+                grad_sample_mode and will not attach hooks (only used when return_controller=True).
+            return_controller: If True, uses controller-based approach (no wrapping).
+                Returns the original unwrapped module with hooks attached via controller.
+                Controller is stored at module._opacus_controller for cleanup if needed.
+                If False (default), wraps module in GradSampleModule.
+                Recommended for HuggingFace transformers and models with custom __getattr__.
 
         Returns:
-            Tuple of  (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
+            If return_controller=False (default):
+                Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
+                Model is a GradSampleModule wrapper around the original model.
 
-            Model is a wrapper around the original model that also computes per sample
-                gradients
+            If return_controller=True:
+                Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
+                Model is the UNWRAPPED original model with hooks attached directly.
+
             Optimizer is a wrapper around the original optimizer that also does
-             gradient clipping and noise addition to the gradients
+                gradient clipping and noise addition to the gradients
             Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
                 Only returned when grad_sample_mode is "ghost".
             DataLoader is a brand new DataLoader object, constructed to behave as
@@ -391,18 +445,22 @@ class PrivacyEngine:
 
         distributed = isinstance(module, (DPDDP, DDP, FSDPModule))
 
-        module = self._prepare_model(
+        controller_or_module = self._prepare_model(
             module,
             batch_first=batch_first,
             max_grad_norm=max_grad_norm,
             loss_reduction=loss_reduction,
             grad_sample_mode=grad_sample_mode,
+            strict=strict,
+            return_controller=return_controller,
         )
         if poisson_sampling:
-            module.forbid_grad_accumulation()
+            controller_or_module.forbid_grad_accumulation()
 
         data_loader = self._prepare_data_loader(
-            data_loader, distributed=distributed, poisson_sampling=poisson_sampling
+            data_loader,
+            distributed=distributed,
+            poisson_sampling=poisson_sampling,
         )
 
         sample_rate = 1 / len(data_loader)
@@ -429,18 +487,29 @@ class PrivacyEngine:
         optimizer.attach_step_hook(
             self.accountant.get_optimizer_hook_fn(sample_rate=sample_rate)
         )
+
         if "ghost" in grad_sample_mode:
             criterion = self._prepare_criterion(
-                module=module,
+                controller_or_module=controller_or_module,
                 optimizer=optimizer,
                 criterion=criterion,
                 loss_reduction=loss_reduction,
                 **kwargs,
             )
 
-            return module, optimizer, criterion, data_loader
+            if return_controller:
+                # Store controller reference on module for cleanup
+                module._opacus_controller = controller_or_module
+                return module, optimizer, criterion, data_loader
+            else:
+                return controller_or_module, optimizer, criterion, data_loader
 
-        return module, optimizer, data_loader
+        if return_controller:
+            # Store controller reference on module for cleanup
+            module._opacus_controller = controller_or_module
+            return module, optimizer, data_loader
+        else:
+            return controller_or_module, optimizer, data_loader
 
     def make_private_with_epsilon(
         self,
@@ -459,10 +528,14 @@ class PrivacyEngine:
         clipping: str = "flat",
         noise_generator=None,
         grad_sample_mode: str = "hooks",
+        strict: bool = True,
+        return_controller: bool = False,
         **kwargs,
     ) -> Union[
         Tuple[GradSampleModule, DPOptimizer, DataLoader],
         Tuple[GradSampleModule, DPOptimizer, DPLossFastGradientClipping, DataLoader],
+        Tuple[nn.Module, DPOptimizer, DataLoader],
+        Tuple[nn.Module, DPOptimizer, DPLossFastGradientClipping, DataLoader],
     ]:
         """
         Version of :meth:`~opacus.privacy_engine.PrivacyEngine.make_private`,
@@ -509,8 +582,10 @@ class PrivacyEngine:
         Returns:
             Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
 
-            Model is a wrapper around the original model that also computes per sample
-                gradients
+            If return_controller=True:
+                Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
+                Model is the UNWRAPPED original model with hooks attached directly.
+
             Optimizer is a wrapper around the original optimizer that also does
                 gradient clipping and noise addition to the gradients
             Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
@@ -548,6 +623,8 @@ class PrivacyEngine:
             grad_sample_mode=grad_sample_mode,
             poisson_sampling=poisson_sampling,
             clipping=clipping,
+            strict=strict,
+            return_controller=return_controller,
             **kwargs,
         )
 
@@ -567,7 +644,7 @@ class PrivacyEngine:
         self,
         *,
         path: Union[str, os.PathLike, BinaryIO, IO[bytes]],
-        module: GradSampleModule,
+        module: Union[nn.Module, GradSampleModule],
         optimizer: Optional[DPOptimizer] = None,
         noise_scheduler: Optional[_NoiseScheduler] = None,
         grad_clip_scheduler: Optional[_GradClipScheduler] = None,
@@ -579,7 +656,7 @@ class PrivacyEngine:
         Saves the state_dict of module, optimizer, and accountant at path.
         Args:
             path: Path to save the state dict objects.
-            module: GradSampleModule to save; wrapped module's state_dict is saved.
+            module: Module to save (wrapped or unwrapped); module's state_dict is saved.
             optimizer: DPOptimizer to save; wrapped optimizer's state_dict is saved.
             noise_scheduler: _NoiseScheduler whose state we should save.
             grad_clip_scheduler: _GradClipScheduler whose state we should save.
@@ -608,7 +685,7 @@ class PrivacyEngine:
         self,
         *,
         path: Union[str, os.PathLike, BinaryIO, IO[bytes]],
-        module: GradSampleModule,
+        module: Union[nn.Module, GradSampleModule],
         optimizer: Optional[DPOptimizer] = None,
         noise_scheduler: Optional[_NoiseScheduler] = None,
         grad_clip_scheduler: Optional[_GradClipScheduler] = None,

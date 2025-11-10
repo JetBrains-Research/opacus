@@ -23,6 +23,7 @@ from typing import Iterable, List, Tuple
 import torch
 import torch.nn as nn
 from opacus.grad_sample.functorch import ft_compute_per_sample_gradient, prepare_layer
+from opacus.grad_sample.grad_sample_hooks_mixin import GradSampleHooksMixin
 from opacus.grad_sample.gsm_base import AbstractGradSampleModule
 from opacus.layers.dp_rnn import DPGRU, DPLSTM, DPRNN, RNNLinear
 from opacus.utils.module_utils import (
@@ -76,15 +77,13 @@ def promote_current_grad_sample(p: nn.Parameter) -> None:
         del p._current_grad_sample
 
 
-class GradSampleModule(AbstractGradSampleModule):
+class GradSampleModule(AbstractGradSampleModule, GradSampleHooksMixin):
     """
     Hooks-based implementation of AbstractGradSampleModule
 
     Computes per-sample gradients using custom-written methods for each layer.
     See README.md for more details
     """
-
-    GRAD_SAMPLERS = {}
 
     def __init__(
         self,
@@ -148,23 +147,9 @@ class GradSampleModule(AbstractGradSampleModule):
     def forward(self, *args, **kwargs):
         return self._module(*args, **kwargs)
 
-    def iterate_submodules(self, module: nn.Module) -> Iterable[nn.Module]:
-        if has_trainable_params(module):
-            yield module
-
-        # Don't recurse if module is handled by functorch
-        if (
-            has_trainable_params(module)
-            and type(module) not in self.GRAD_SAMPLERS
-            and type(module) not in [DPRNN, DPLSTM, DPGRU]
-        ):
-            return
-
-        for m in module.children():
-            yield from self.iterate_submodules(m)
-
-    def _get_module_type(self, module: nn.Module) -> str:
-        return type(module)
+    def _get_target_module(self) -> nn.Module:
+        """Return the module to attach hooks to."""
+        return self._module
 
     def add_hooks(
         self,
@@ -181,7 +166,6 @@ class GradSampleModule(AbstractGradSampleModule):
         Call ``remove_hooks(model)`` to disable this.
 
         Args:
-            model: the model to which hooks are added
             batch_first: Flag to indicate if the input tensor to the corresponding module
                 has the first dimension representing the batch. If set to True, dimensions on
                 input tensor are expected be ``[batch_size, ...]``, otherwise
@@ -197,30 +181,14 @@ class GradSampleModule(AbstractGradSampleModule):
             self._module.autograd_grad_sample_hooks = []
             self.autograd_grad_sample_hooks = self._module.autograd_grad_sample_hooks
 
-        for module in self.iterate_submodules(self._module):
-            # Do not add hooks to DPRNN, DPLSTM or DPGRU as the hooks are handled by the `RNNLinear`
-            if type(module) in [DPRNN, DPLSTM, DPGRU]:
-                continue
-
-            module_type = self._get_module_type(module)
-            if force_functorch or not (module_type in self.GRAD_SAMPLERS):
-                prepare_layer(module, batch_first=batch_first)
-
-            self.autograd_grad_sample_hooks.append(
-                module.register_forward_hook(self.capture_activations_hook)
-            )
-
-            self.autograd_grad_sample_hooks.append(
-                module.register_full_backward_hook(
-                    partial(
-                        self.capture_backprops_hook,
-                        loss_reduction=loss_reduction,
-                        batch_first=batch_first,
-                    )
-                )
-            )
-
-        self.enable_hooks()
+        # Delegate to mixin implementation
+        self._add_hooks_impl(
+            target_module=self._module,
+            hooks_list=self.autograd_grad_sample_hooks,
+            batch_first=batch_first,
+            loss_reduction=loss_reduction,
+            force_functorch=force_functorch,
+        )
 
     def remove_hooks(self) -> None:
         """
@@ -269,230 +237,20 @@ class GradSampleModule(AbstractGradSampleModule):
         super()._close()
         self.remove_hooks()
 
-    def capture_activations_hook(
-        self,
-        module: nn.Module,
-        forward_input: List[torch.Tensor],
-        _forward_output: torch.Tensor,
-    ):
-        if (
-            not requires_grad(module)
-            or not module.training
-            or not torch.is_grad_enabled()
-        ):
-            return
-
-        if not self.hooks_enabled:
-            return
-
-        if not hasattr(module, "activations"):
-            module.activations = []
-        module.activations.append([t.detach() for t in forward_input])  # pyre-ignore
-
-        for _, p in trainable_parameters(module):
-            p._forward_counter += 1
-
-    def capture_backprops_hook(
-        self,
-        module: nn.Module,
-        _forward_input: torch.Tensor,
-        forward_output: torch.Tensor,
-        loss_reduction: str,
-        batch_first: bool,
-    ):
-        """
-        Computes per sample gradients given the current backprops and activations
-        stored by the associated forward hook. Computed per sample gradients are
-        stored in ``grad_sample`` field in each parameter.
-
-        For non-recurrent layers the process is straightforward: for each
-        ``loss.backward()`` call this hook will be called exactly one. For recurrent
-        layers, however, this is more complicated and the hook will be called multiple
-        times, while still processing the same batch of data.
-
-        For this reason we first accumulate the gradients from *the same batch* in
-        ``p._current_grad_sample`` and then, when we detect the end of a full backward
-        pass - we store accumulated result on ``p.grad_sample``.
-
-        From there, ``p.grad_sample`` could be either a Tensor or a list of Tensors,
-        if accumulated over multiple batches
-
-        Args:
-            module: nn.Module,
-            _forward_input: torch.Tensor,
-            forward_output: torch.Tensor,
-            loss_reduction: str,
-            batch_first: bool,
-        """
-        if not self.hooks_enabled:
-            return
-
-        backprops = forward_output[0].detach()
-        activations, backprops = self.rearrange_grad_samples(
-            module=module,
-            backprops=backprops,
-            loss_reduction=loss_reduction,
-            batch_first=batch_first,
-        )
-        if (
-            not self.force_functorch
-            and self._get_module_type(module) in self.GRAD_SAMPLERS
-        ):
-            grad_sampler_fn = self.GRAD_SAMPLERS[self._get_module_type(module)]
-        else:
-            grad_sampler_fn = ft_compute_per_sample_gradient
-
-        grad_samples = grad_sampler_fn(module, activations, backprops)
-        for param, gs in grad_samples.items():
-            create_or_accumulate_grad_sample(
-                param=param, grad_sample=gs, max_batch_len=module.max_batch_len
-            )
-
-        # Detect end of current batch processing and switch accumulation
-        # mode from sum to stacking. Used for RNNs and tied parameters
-        # (See #417 for details)
-        for _, p in trainable_parameters(module):
-            p._forward_counter -= 1
-            if p._forward_counter == 0:
-                promote_current_grad_sample(p)
-
-            if not self.grad_accumulation_allowed:
-                if isinstance(p.grad_sample, list) and len(p.grad_sample) > 1:
-                    raise ValueError(
-                        "Poisson sampling is not compatible with grad accumulation. "
-                        "You need to call optimizer.step() after every forward/backward pass "
-                        "or consider using BatchMemoryManager"
-                    )
-
-        if len(module.activations) == 0:
-            if hasattr(module, "max_batch_len"):
-                del module.max_batch_len
-
-    def rearrange_grad_samples(
-        self,
-        *,
-        module: nn.Module,
-        backprops: torch.Tensor,
-        loss_reduction: str,
-        batch_first: bool,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Rearrange activations and grad_samples based on loss reduction and batch dim
-
-        Args:
-            module: the module for which per-sample gradients are computed
-            backprops: the captured backprops
-            loss_reduction: either "mean" or "sum" depending on whether backpropped
-                loss was averaged or summed over batch
-            batch_first: True is batch dimension is first
-        """
-        if not hasattr(module, "activations"):
-            raise ValueError(
-                f"No activations detected for {type(module)},"
-                " run forward after add_hooks(model)"
-            )
-
-        batch_dim = 0 if batch_first or type(module) is RNNLinear else 1
-
-        if not hasattr(module, "max_batch_len"):
-            # For packed sequences, max_batch_len is set in the forward of the model (e.g. the LSTM)
-            # Otherwise we infer it here
-            module.max_batch_len = _get_batch_size(
-                module=module,
-                batch_dim=batch_dim,
-            )
-        activations = module.activations.pop()
-
-        n = module.max_batch_len
-        if loss_reduction == "mean":
-            backprops = backprops * n
-        elif loss_reduction == "sum":
-            backprops = backprops
-        else:
-            raise ValueError(
-                f"loss_reduction = {loss_reduction}. Only 'sum' and 'mean' losses are supported"
-            )
-
-        # No matter where the batch dimension was, .grad_samples will *always* put it in the first dim
-        if batch_dim != 0:
-            activations = [
-                t.permute([batch_dim] + [x for x in range(t.dim()) if x != batch_dim])
-                for t in activations
-            ]
-            backprops = backprops.permute(
-                [batch_dim] + [x for x in range(backprops.dim()) if x != batch_dim]
-            )
-
-        return activations, backprops
-
-    @classmethod
-    def is_supported(cls, module: nn.Module) -> bool:
-        """
-        Checks if this individual model is supported (i.e. has a registered
-        grad sampler function)
-
-        Notes:
-            Note that this method does not check submodules
-
-        Args:
-            module: nn.Module to be checked
-
-        Returns:
-            ``True`` if grad sampler is found, ``False`` otherwise
-        """
-        warnings.warn(
-            "GradSampleModule.is_supported is deprecated, as all layers can now be used with functorch.",
-            DeprecationWarning,
-        )
-
-        return True
-
-    @classmethod
-    def validate(
-        cls, module: nn.Module, *, strict: bool = False
-    ) -> List[NotImplementedError]:
-        """
-        Check if per sample gradients can be fully computed for a given model
-
-        Args:
-            module: nn.Module to be checked
-            raise_if_error: Behaviour in case of a negative check result. Will
-            return the list of exceptions if set to ``False``, and throw otherwise
-
-        Returns:
-            Empty list of validation is successful.
-            List of validation errors  if ``raise_if_error=False`` and
-            unsupported modules are found
-
-        Raises:
-            NotImplementedError
-                If ``raise_if_error=True`` and unsupported modules are found
-        """
-        errors = []
-        errors.extend(
-            [
-                NotImplementedError(
-                    f"Model contains a trainable layer with buffers"
-                    f"that Opacus doesn't currently support({m_name}:{m}). "
-                )
-                for m_name, m in trainable_modules(module)
-                # With functorch, all modules are trainable
-                # We still want to avoid module that have buffers (e.g. BatchNorm)
-                # as the buffers are not private
-                if len(list(m.buffers())) > 0
-            ]
-        )
-        # raise or return errors as needed
-        if strict and len(errors) > 0:
-            raise NotImplementedError(errors)
-        else:
-            return errors
-
+    # Override base class no-op methods to use mixin implementations
     def forbid_grad_accumulation(self):
-        self.grad_accumulation_allowed = False
+        """Forbid gradient accumulation (for Poisson sampling)."""
+        GradSampleHooksMixin.forbid_grad_accumulation(self)
 
     def allow_grad_accumulation(self):
-        self.grad_accumulation_allowed = True
+        """Allow gradient accumulation."""
+        GradSampleHooksMixin.allow_grad_accumulation(self)
+
+    # Note: The following methods are inherited from GradSampleHooksMixin:
+    # - capture_activations_hook
+    # - capture_backprops_hook
+    # - rearrange_grad_samples
+    # - validate
 
 
 def _get_batch_size(*, module: nn.Module, batch_dim: int) -> int:

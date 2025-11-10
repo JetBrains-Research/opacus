@@ -32,6 +32,7 @@ class GradSampleModuleExpandedWeights(AbstractGradSampleModule):
         *,
         batch_first=True,
         loss_reduction="mean",
+        strict: bool = True,
     ):
         if not batch_first:
             raise NotImplementedError
@@ -41,6 +42,8 @@ class GradSampleModuleExpandedWeights(AbstractGradSampleModule):
             batch_first=batch_first,
             loss_reduction=loss_reduction,
         )
+        # Note: strict parameter is accepted for compatibility but not used
+        # in ExpandedWeights implementation
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
         from torch.nn.utils._per_sample_grad import call_for_per_sample_grads

@@ -91,20 +91,29 @@ def register_norm_sampler(
     return decorator
 
 
-def wrap_model(model: nn.Module, grad_sample_mode: str, *args, **kwargs):
-    cls = get_gsm_class(grad_sample_mode)
-    if grad_sample_mode == "functorch":
-        kwargs["force_functorch"] = True
-    return cls(model, *args, **kwargs)
-
-
 def get_gsm_class(grad_sample_mode: str) -> Type[AbstractGradSampleModule]:
     """
-    Returns AbstractGradSampleModule subclass correspinding to the input mode.
+    Returns AbstractGradSampleModule subclass corresponding to the input mode.
+
+    This is used for the wrapping approach where the model is wrapped in a
+    GradSampleModule subclass.
+
     See README for detailed comparison between grad sample modes.
 
-    :param grad_sample_mode:
-    :return:
+    Args:
+        grad_sample_mode: Mode for computing per-sample gradients. Supported values:
+            - "hooks": Standard hook-based computation (GradSampleModule)
+            - "functorch": Functorch-based computation (GradSampleModule with force_functorch=True)
+            - "ew": Expanded weights approach (GradSampleModuleExpandedWeights)
+            - "ghost": Ghost clipping with wrapping (GradSampleModuleFastGradientClipping)
+            - "ghost_fsdp": Ghost clipping with FSDP (GradSampleModuleFastGradientClippingFSDP)
+            - "no_op": No-op implementation (GradSampleModuleNoOp)
+
+    Returns:
+        AbstractGradSampleModule subclass
+
+    Raises:
+        ValueError: If grad_sample_mode is not recognized
     """
     if grad_sample_mode in ["hooks", "functorch"]:
         return GradSampleModule
@@ -119,24 +128,30 @@ def get_gsm_class(grad_sample_mode: str) -> Type[AbstractGradSampleModule]:
     else:
         raise ValueError(
             f"Unexpected grad_sample_mode: {grad_sample_mode}. "
-            f"Allowed values: hooks, ew"
+            f"Allowed values: hooks, functorch, ew, ghost, ghost_fsdp, no_op"
         )
-
-
-def wrap_model_in_controller(model: nn.Module, grad_sample_mode: str, *args, **kwargs):
-    cls = get_gsc_class(grad_sample_mode)
-    if grad_sample_mode == "functorch":
-        kwargs["force_functorch"] = True
-    return cls(model, *args, **kwargs)
 
 
 def get_gsc_class(grad_sample_mode: str):
     """
     Returns GradSampleController subclass corresponding to the input mode.
+
+    This is used for the controller-based approach where hooks are attached
+    directly to the model without wrapping.
+
     See README for a detailed comparison between grad sample modes.
 
-    :param grad_sample_mode:
-    :return:
+    Args:
+        grad_sample_mode: Mode for computing per-sample gradients. Supported values:
+            - "hooks": Standard hook-based computation (GradSampleController)
+            - "functorch": Functorch-based computation (GradSampleController with force_functorch=True)
+            - "ghost": Ghost clipping without wrapping (GradSampleControllerFastGradientClipping)
+
+    Returns:
+        GradSampleController subclass
+
+    Raises:
+        ValueError: If grad_sample_mode is not recognized or not supported by controllers
     """
     if grad_sample_mode in ["hooks", "functorch"]:
         return GradSampleController
@@ -145,5 +160,49 @@ def get_gsc_class(grad_sample_mode: str):
     else:
         raise ValueError(
             f"Unexpected grad_sample_mode: {grad_sample_mode}. "
-            f"Allowed values: hooks, functorch, ghost"
+            f"Controller-based approach supports: hooks, functorch, ghost"
         )
+
+
+def wrap_model(
+    model: nn.Module,
+    grad_sample_mode: str,
+    use_controller: bool = False,
+    *args,
+    **kwargs,
+):
+    """
+    Wraps a model for per-sample gradient computation.
+
+    This is a unified interface that supports both wrapping-based and controller-based
+    approaches for computing per-sample gradients.
+
+    Args:
+        model: PyTorch module to be wrapped or controlled
+        grad_sample_mode: Mode for computing per-sample gradients
+        use_controller: If True, uses controller-based approach (no wrapping).
+            If False (default), wraps model in GradSampleModule subclass.
+        *args: Additional positional arguments passed to the wrapper/controller
+        **kwargs: Additional keyword arguments passed to the wrapper/controller
+
+    Returns:
+        Either:
+        - GradSampleModule subclass instance (if use_controller=False)
+        - GradSampleController instance (if use_controller=True)
+
+    Notes:
+        - When use_controller=True, the original model is NOT wrapped and can be used
+          as-is. The controller manages hooks on the side.
+        - When use_controller=False, the model is wrapped and should be used via the
+          returned wrapper object.
+    """
+    # Set force_functorch flag for functorch mode
+    if grad_sample_mode == "functorch":
+        kwargs["force_functorch"] = True
+
+    if use_controller:
+        cls = get_gsc_class(grad_sample_mode)
+    else:
+        cls = get_gsm_class(grad_sample_mode)
+
+    return cls(model, *args, **kwargs)

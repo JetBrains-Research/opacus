@@ -12,17 +12,16 @@ We currently provide three independent approaches for computing per sample gradi
 Each implementation comes with its own set of limitations and benefits.
 
 **TL;DR:**
-- Use `GradSampleModule` (`grad_sample_mode="hooks"`) for stable implementation with standard models
-- Use `GradSampleController` via `PrivacyEngineGradSampleController` for transformer models and when you need direct model access without wrapping
+- Use `GradSampleModule` (`grad_sample_mode="hooks"`) for stable implementation with standard models (default)
+- Use controller mode (`return_controller=True`) for transformer models and when you need direct model access without wrapping
 - Use `GradSampleModuleExpandedWeights` (`grad_sample_mode="ew"`) if you want to experiment with better performance
 - Use `grad_sample_mode="functorch"` if your model has unsupported layers
 
 Please report any strange errors or unexpected behaviour to us!
 
-## GradSampleController approach (No Model Wrapping)
+## Controller-Based Approach (No Model Wrapping)
+- Usage: Set `return_controller=True` in `PrivacyEngine.make_private()`
 - Controller class: ``opacus.grad_sample.GradSampleController``
-- Privacy Engine: ``opacus.privacy_engine_gsc.PrivacyEngineGradSampleController``
-- Usage: Use `PrivacyEngineGradSampleController` instead of `PrivacyEngine`
 
 **Recommended for transformer models and when model wrapping causes issues.**
 
@@ -35,7 +34,21 @@ Computes per-sample gradients by attaching hooks directly to model parameters wi
 - ✅ Better compatibility with HuggingFace transformers and models with custom `__getattr__`
 - ✅ Same grad sampler methods as `GradSampleModule`
 
-See [CONTROLLER_BASED_PRIVACY_ENGINE.md](../../docs/CONTROLLER_BASED_PRIVACY_ENGINE.md) for detailed documentation.
+**Example:**
+```python
+from opacus import PrivacyEngine
+
+privacy_engine = PrivacyEngine()
+model, optimizer, dataloader = privacy_engine.make_private(
+    module=model,
+    optimizer=optimizer,
+    data_loader=dataloader,
+    noise_multiplier=1.0,
+    max_grad_norm=1.0,
+    return_controller=True,  # ← Enable controller mode
+)
+# model is now unwrapped with hooks attached directly
+```
 
 ## Hooks-based approach (Model Wrapping)
 - Model wrapping class: ``opacus.grad_sample.grad_sample_module.GradSampleModule``
@@ -81,7 +94,7 @@ Please note that these are known limitations and we plan to improve Expanded Wei
 | xxx                          | GradSampleModule (Hooks) | GradSampleController | Expanded Weights | Functorch    |
 |:----------------------------:|:------------------------:|:-------------------:|:----------------:|:------------:|
 | Required PyTorch version     | 1.8+                     | 1.8+                | 1.13+            | 1.12 (to be updated) |
-| Development status           | Deprecated mechanism     | ✅ Stable           | Beta             | Beta         |
+| Development status           | Deprecated mechanism     | ✅ Beta             | Beta             | Beta         |
 | Model wrapping               | ✅ Wraps model           | ✅ No wrapping      | ✅ Wraps model   | ✅ Wraps model |
 | Runtime Performance†          | baseline                | baseline            | ✅ ~25% faster   | 🟨 0-50% slower |
 | Transformer compatibility    | 🟨 May have issues      | ✅ Excellent        | 🟨 May have issues | 🟨 May have issues |

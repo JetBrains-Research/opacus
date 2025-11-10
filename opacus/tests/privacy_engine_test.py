@@ -69,6 +69,7 @@ class BasePrivacyEngineTest(ABC):
         self.criterion = nn.CrossEntropyLoss()
         self.BATCH_FIRST = True
         self.GRAD_SAMPLE_MODE = "hooks"
+        self.RETURN_CONTROLLER = False  # Override in subclasses for controller mode
 
         torch.manual_seed(42)
 
@@ -143,6 +144,7 @@ class BasePrivacyEngineTest(ABC):
             poisson_sampling=poisson_sampling,
             clipping=clipping,
             grad_sample_mode=grad_sample_mode,
+            return_controller=self.RETURN_CONTROLLER,
         )
 
         return model, optimizer, poisson_dl, privacy_engine
@@ -1020,3 +1022,69 @@ class PrivacyEngineCustomLayerTest(BasePrivacyEngineTest, unittest.TestCase):
 
     def _init_model(self):
         return ModelWithCustomLinear()
+
+
+# ============================================================================
+# Controller-based tests - Same tests but with return_controller=True
+# ============================================================================
+
+
+class PrivacyEngineConvNetControllerTest(PrivacyEngineConvNetTest):
+    """Test ConvNet with controller-based approach (no model wrapping)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.RETURN_CONTROLLER = True
+
+    def tearDown(self) -> None:
+        """Clean up controller hooks after each test."""
+        # The model might have a controller attached that needs cleanup
+        pass
+
+
+class PrivacyEngineConvNetFrozenControllerTest(PrivacyEngineConvNetFrozenTest):
+    """Test ConvNet with frozen layers using controller-based approach."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.RETURN_CONTROLLER = True
+
+    def tearDown(self) -> None:
+        """Clean up controller hooks after each test."""
+        pass
+
+
+class PrivacyEngineTextControllerTest(PrivacyEngineTextTest):
+    """Test text models with controller-based approach."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.RETURN_CONTROLLER = True
+
+    def tearDown(self) -> None:
+        """Clean up controller hooks after each test."""
+        pass
+
+
+class PrivacyEngineTiedWeightsControllerTest(PrivacyEngineTiedWeightsTest):
+    """Test tied weights with controller-based approach."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.RETURN_CONTROLLER = True
+
+    def tearDown(self) -> None:
+        """Clean up controller hooks after each test."""
+        pass
+
+
+class PrivacyEngineCustomLayerControllerTest(PrivacyEngineCustomLayerTest):
+    """Test custom layers with controller-based approach."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.RETURN_CONTROLLER = True
+
+    def tearDown(self) -> None:
+        """Clean up controller hooks after each test."""
+        pass

@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 from opacus.optimizers.adaclipoptimizer import AdaClipDPOptimizer
 from opacus.privacy_engine import PrivacyEngine
-from opacus.privacy_engine_gsc import PrivacyEngineGradSampleController
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -24,6 +23,7 @@ class BaseAdaClipTest:
 
     # Subclasses should set this
     ENGINE_CLASS = None
+    USE_CONTROLLER = False  # Set to True in controller-based subclass
 
     def setUp(self):
         self.DATA_SIZE = 100
@@ -45,29 +45,29 @@ class BaseAdaClipTest:
 
     def _make_private(self, model, optimizer, **kwargs):
         """
-        Wrapper to handle both PrivacyEngine types.
+        Wrapper to handle both PrivacyEngine modes.
 
         Returns: (model, optimizer, dataloader, controller_or_none)
         """
         privacy_engine = self.ENGINE_CLASS()
 
-        # Check if this is controller-based engine
-        is_controller_based = isinstance(
-            privacy_engine, PrivacyEngineGradSampleController
-        )
-
-        if is_controller_based:
-            # Controller-based engine with return_controller=True
-            controller, optimizer, dataloader = privacy_engine.make_private(
+        # Use controller mode if specified
+        if self.USE_CONTROLLER:
+            # Controller-based mode with return_controller=True
+            # When return_controller=True, make_private returns (model, optimizer, dataloader)
+            # and stores the controller on model._opacus_controller
+            model, optimizer, dataloader = privacy_engine.make_private(
                 module=model,
                 optimizer=optimizer,
                 data_loader=self.dataloader,
                 return_controller=True,
                 **kwargs,
             )
+            # Extract controller from model
+            controller = model._opacus_controller
             return model, optimizer, dataloader, controller
         else:
-            # Standard engine
+            # Standard wrapped mode
             model, optimizer, dataloader = privacy_engine.make_private(
                 module=model, optimizer=optimizer, data_loader=self.dataloader, **kwargs
             )
@@ -432,7 +432,8 @@ class AdaClipStandardEngineTest(BaseAdaClipTest, unittest.TestCase):
 class AdaClipGradSampleControllerEngineTest(BaseAdaClipTest, unittest.TestCase):
     """Test AdaClipDPOptimizer with GradSampleController-based PrivacyEngine."""
 
-    ENGINE_CLASS = PrivacyEngineGradSampleController
+    ENGINE_CLASS = PrivacyEngine
+    USE_CONTROLLER = True  # Use controller mode
 
 
 if __name__ == "__main__":

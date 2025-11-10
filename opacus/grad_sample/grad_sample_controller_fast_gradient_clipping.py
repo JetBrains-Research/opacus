@@ -27,11 +27,10 @@ from typing import List
 
 import torch
 import torch.nn as nn
-from opacus.grad_sample.functorch import ft_compute_per_sample_gradient
 from opacus.grad_sample.grad_sample_controller import GradSampleController
-from opacus.grad_sample.grad_sample_module import (
-    create_or_accumulate_grad_sample,
-    promote_current_grad_sample,
+from opacus.grad_sample.grad_sample_hooks_mixin import (
+    GradSampleFastGradientClippingMixin,
+    create_norm_sample,
 )
 from opacus.layers.dp_rnn import DPGRU, DPLSTM, DPRNN
 from opacus.utils.module_utils import trainable_modules, trainable_parameters
@@ -41,38 +40,9 @@ logger = logging.getLogger(__name__)
 logger.disabled = True
 
 
-def create_norm_sample(
-    *, param: torch.Tensor, grad_sample: torch.Tensor, max_batch_len: int
-) -> None:
-    """
-    Creates a ``_norm_sample`` attribute in the given parameter
-
-
-    Args:
-        param: Parameter to which ``_norm_sample`` will be added
-        grad_sample: Per-sample gradients tensor. Must be of the same
-            shape as ``param`` with extra batch dimension
-    """
-
-    if param.requires_grad:
-        if (
-            max_batch_len == 0
-        ):  # To handle the case of empty batch that may arise from Poisson sampling
-            param._norm_sample = torch.tensor(
-                [], device=grad_sample.device, dtype=grad_sample.dtype
-            )
-        else:
-            param._norm_sample = torch.zeros(
-                torch.Size([max_batch_len, 1]),
-                device=grad_sample.device,
-                dtype=grad_sample.dtype,
-            )
-            param._norm_sample = grad_sample.reshape(len(grad_sample), -1).norm(
-                2, dim=-1
-            )
-
-
-class GradSampleControllerFastGradientClipping(GradSampleController):
+class GradSampleControllerFastGradientClipping(
+    GradSampleController, GradSampleFastGradientClippingMixin
+):
     """
     Controller for managing privacy hooks with Fast Gradient and Ghost Clipping support
 
@@ -193,94 +163,7 @@ class GradSampleControllerFastGradientClipping(GradSampleController):
                         "Parameter tying is not supported with Ghost Clipping"
                     )
 
-    def capture_backprops_hook(
-        self,
-        module: nn.Module,
-        _forward_input: torch.Tensor,
-        forward_output: torch.Tensor,
-        loss_reduction: str,
-        batch_first: bool,
-    ):
-        """
-        Computes per sample gradient norms given the current backprops and activations
-        stored by the associated forward hook. Computed per sample gradient norms are
-        stored in ``_norm_sample`` field in each parameter.
-
-        For non-recurrent layers the process is straightforward: for each
-        ``loss.backward()`` call this hook will be called exactly one. For recurrent
-        layers, however, this is more complicated and the hook will be called multiple
-        times, while still processing the same batch of data.
-
-        For this reason we first accumulate the gradients from *the same batch* in
-        ``p._current_grad_sample`` and then, when we detect the end of a full backward
-        pass - we store accumulated result on ``p.grad_sample`` (for fast gradient clipping)
-        or ``p._norm_sample`` (for ghost clipping).
-
-        Args:
-            module: nn.Module,
-            _forward_input: torch.Tensor,
-            forward_output: torch.Tensor,
-            loss_reduction: str,
-            batch_first: bool,
-        """
-        if not self.hooks_enabled:
-            return
-
-        backprops = forward_output[0].detach()
-        activations, backprops = self.rearrange_grad_samples(
-            module=module,
-            backprops=backprops,
-            loss_reduction=loss_reduction,
-            batch_first=batch_first,
-        )
-
-        # Handle DTensor if needed
-        activations = [
-            temp.to_local() if type(temp) is torch.distributed.tensor.DTensor else temp
-            for temp in activations
-        ]
-
-        if self.use_ghost_clipping and type(module) in self.NORM_SAMPLERS:
-            # Ghost clipping: compute norms directly
-            norm_sampler_fn = self.NORM_SAMPLERS[type(module)]
-            norm_samples = norm_sampler_fn(module, activations, backprops)
-
-            for param, ns in norm_samples.items():
-                if param.requires_grad:
-                    param._norm_sample = ns
-                    param._forward_counter -= 1
-
-        else:
-            # Fast gradient clipping: compute full gradients then norms
-            if not self.force_functorch and type(module) in self.GRAD_SAMPLERS:
-                grad_sampler_fn = self.GRAD_SAMPLERS[type(module)]
-            else:
-                grad_sampler_fn = ft_compute_per_sample_gradient
-
-            grad_samples = grad_sampler_fn(module, activations, backprops)
-            for param, gs in grad_samples.items():
-                create_or_accumulate_grad_sample(
-                    param=param, grad_sample=gs, max_batch_len=module.max_batch_len
-                )
-            del grad_samples
-
-            # Detect end of current batch processing and switch accumulation
-            # mode from sum to stacking. Used for RNNs and tied parameters
-            # (See #417 for details)
-            for _, p in trainable_parameters(module):
-                p._forward_counter -= 1
-                if p._forward_counter == 0:
-                    promote_current_grad_sample(p)
-                    create_norm_sample(
-                        param=p,
-                        grad_sample=p.grad_sample,
-                        max_batch_len=module.max_batch_len,
-                    )
-                    p.grad_sample = None
-
-        if len(module.activations) == 0:
-            if hasattr(module, "max_batch_len"):
-                del module.max_batch_len
+    # Note: capture_backprops_hook is inherited from GradSampleFastGradientClippingMixin
 
     def log_module_gradient_sample_mode(
         self, module: nn.Module, *, force_functorch=False, use_ghost_clipping=True
