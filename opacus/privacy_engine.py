@@ -190,13 +190,14 @@ class PrivacyEngine:
             loss_reduction: Loss reduction method ("mean" or "sum")
             grad_sample_mode: Mode for computing per-sample gradients
             strict: If True, validates module strictly
-            wrap_model: If True, wraps module in GradSampleModule.
-                If False, uses hooks-based approach (no wrapping).
+            wrap_model: If True (default), wraps module in GradSampleModule.
+                If False, uses non-wrapping mode - hooks attached directly to model.
             use_ghost_clipping: If True and grad_sample_mode="ghost", uses ghost clipping
 
         Returns:
-            Either GradSampleModule instance (if wrap_model=True) or
-            GradSampleHooks instance (if wrap_model=False)
+            Either GradSampleModule wrapper (if wrap_model=True) or
+            GradSampleHooks instance (if wrap_model=False).
+            Note: In non-wrapping mode, hooks are also stored at module._opacus_hooks
         """
         # Validate module unless using hooks-based approach
         # (hooks validate internally)
@@ -348,10 +349,15 @@ class PrivacyEngine:
         wrap_model: bool = True,
         **kwargs,
     ) -> Union[
-        Tuple[GradSampleModule, DPOptimizer, DataLoader],
-        Tuple[GradSampleModule, DPOptimizer, DPLossFastGradientClipping, DataLoader],
-        Tuple[nn.Module, DPOptimizer, DataLoader],
-        Tuple[nn.Module, DPOptimizer, DPLossFastGradientClipping, DataLoader],
+        Tuple[
+            Union[AbstractGradSampleModule, GradSampleHooks], DPOptimizer, DataLoader
+        ],
+        Tuple[
+            Union[AbstractGradSampleModule, GradSampleHooks],
+            DPOptimizer,
+            DPLossFastGradientClipping,
+            DataLoader,
+        ],
     ]:
         """
         Add privacy-related responsibilities to the main PyTorch training objects:
@@ -402,21 +408,23 @@ class PrivacyEngine:
                 :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
                 details
             strict: If True, will raise an error if the module is incompatible with
-                grad_sample_mode and will not attach hooks (only used when wrap_model=False).
+                grad_sample_mode.
             wrap_model: If True (default), wraps module in GradSampleModule.
-                If False, uses hooks-based approach (no wrapping).
-                Returns the original unwrapped module with hooks attached directly.
-                Hooks are stored at module._opacus_hooks for cleanup if needed.
-                Recommended for HuggingFace transformers and models with custom __getattr__.
+                If False, uses non-wrapping mode - attaches hooks directly to the provided model
+                without wrapping. The original model remains unchanged and can be used normally.
+                Cleanup via returned hooks.cleanup() is required when done. Recommended for
+                HuggingFace Transformers and models with custom __getattr__ that don't work well with wrapping.
 
         Returns:
-            If wrap_model=True (default):
-                Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
-                Model is a GradSampleModule wrapper around the original model.
+            Tuple of (hooks, optimizer, data_loader) or (hooks, optimizer, criterion, data_loader).
 
-            If wrap_model=False:
-                Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
-                Model is the UNWRAPPED original model with hooks attached directly.
+            Returns a hooks object for gradient sampling and cleanup:
+            - If wrap_model=True: Returns GradSampleModule wrapper (use as your model)
+            - If wrap_model=False: Returns GradSampleHooks object (use your original model directly,
+              use returned hooks only for cleanup)
+
+            The hooks object provides .cleanup() method. In non-wrapping mode, the original model
+            passed to make_private() is unchanged - continue using it normally.
 
             Optimizer is a wrapper around the original optimizer that also does
                 gradient clipping and noise addition to the gradients
@@ -494,16 +502,16 @@ class PrivacyEngine:
             )
 
             if not wrap_model:
-                # Store hooks reference on module for cleanup
+                # Store hooks reference on module for backup access
                 module._opacus_hooks = hooks_or_module
-                return module, optimizer, criterion, data_loader
+                return hooks_or_module, optimizer, criterion, data_loader
             else:
                 return hooks_or_module, optimizer, criterion, data_loader
 
         if not wrap_model:
-            # Store hooks reference on module for cleanup
+            # Store hooks reference on module for backup access
             module._opacus_hooks = hooks_or_module
-            return module, optimizer, data_loader
+            return hooks_or_module, optimizer, data_loader
         else:
             return hooks_or_module, optimizer, data_loader
 
@@ -528,10 +536,15 @@ class PrivacyEngine:
         wrap_model: bool = True,
         **kwargs,
     ) -> Union[
-        Tuple[GradSampleModule, DPOptimizer, DataLoader],
-        Tuple[GradSampleModule, DPOptimizer, DPLossFastGradientClipping, DataLoader],
-        Tuple[nn.Module, DPOptimizer, DataLoader],
-        Tuple[nn.Module, DPOptimizer, DPLossFastGradientClipping, DataLoader],
+        Tuple[
+            Union[AbstractGradSampleModule, GradSampleHooks], DPOptimizer, DataLoader
+        ],
+        Tuple[
+            Union[AbstractGradSampleModule, GradSampleHooks],
+            DPOptimizer,
+            DPLossFastGradientClipping,
+            DataLoader,
+        ],
     ]:
         """
         Version of :meth:`~opacus.privacy_engine.PrivacyEngine.make_private`,
@@ -575,21 +588,23 @@ class PrivacyEngine:
                 :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
                 details
             strict: If True, will raise an error if the module is incompatible with
-                grad_sample_mode and will not attach hooks (only used when wrap_model=False).
+                grad_sample_mode.
             wrap_model: If True (default), wraps module in GradSampleModule.
-                If False, uses hooks-based approach (no wrapping).
-                Returns the original unwrapped module with hooks attached directly.
-                Hooks are stored at module._opacus_hooks for cleanup if needed.
-                Recommended for HuggingFace transformers and models with custom __getattr__.
+                If False, uses non-wrapping mode - attaches hooks directly to the provided model
+                without wrapping. The original model remains unchanged and can be used normally.
+                Cleanup via returned hooks.cleanup() is required when done. Recommended for
+                HuggingFace Transformers and models with custom __getattr__ that don't work well with wrapping.
 
         Returns:
-            If wrap_model=True (default):
-                Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
-                Model is a GradSampleModule wrapper around the original model.
+            Tuple of (hooks, optimizer, data_loader) or (hooks, optimizer, criterion, data_loader).
 
-            If wrap_model=False:
-                Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
-                Model is the UNWRAPPED original model with hooks attached directly.
+            Returns a hooks object for gradient sampling and cleanup:
+            - If wrap_model=True: Returns GradSampleModule wrapper (use as your model)
+            - If wrap_model=False: Returns GradSampleHooks object (use your original model directly,
+              use returned hooks only for cleanup)
+
+            The hooks object provides .cleanup() method. In non-wrapping mode, the original model
+            passed to make_private() is unchanged - continue using it normally.
 
             Optimizer is a wrapper around the original optimizer that also does
                 gradient clipping and noise addition to the gradients

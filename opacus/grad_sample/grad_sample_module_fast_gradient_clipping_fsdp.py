@@ -58,6 +58,23 @@ class FSDPHooks(FastGradientHooks):
             **kwargs,
         )
 
+    def set_grad_sample_to_none(self):
+        super().set_grad_sample_to_none()
+        for module in self._module.modules():
+            if hasattr(module, "norm_sample"):
+                for ns in module.norm_sample:
+                    ns.zero_()
+            if hasattr(module, "_forward_counter"):
+                module._forward_counter = 0
+
+    def del_grad_sample(self):
+        super().del_grad_sample()
+        for module in self._module.modules():
+            if hasattr(module, "norm_sample"):
+                delattr(module, "norm_sample")
+            if hasattr(module, "_forward_counter"):
+                delattr(module, "_forward_counter")
+
     def _get_module_type(self, module: nn.Module) -> str:
         module_type = (
             module.__class__.__bases__[1]
@@ -125,6 +142,9 @@ class FSDPHooks(FastGradientHooks):
             batch_first=batch_first,
         )
 
+        self.compute_sample_gradients(module, activations, backprops)
+
+    def compute_sample_gradients(self, module, activations, backprops):
         if not hasattr(module, "norm_sample"):
             module.norm_sample = []
             for _, param in trainable_parameters(module):
@@ -137,7 +157,6 @@ class FSDPHooks(FastGradientHooks):
                 )
 
         module_type = self._get_module_type(module)
-        module._forward_counter -= 1
         if self.use_ghost_clipping and module_type in self.NORM_SAMPLERS:
             norm_sampler_fn = self.NORM_SAMPLERS[module_type]
             norm_samples = norm_sampler_fn(module, activations, backprops)
@@ -158,6 +177,7 @@ class FSDPHooks(FastGradientHooks):
                 module.norm_sample[idx] = gs.reshape(len(gs), -1).norm(2, dim=-1)
             del grad_samples
 
+        module._forward_counter -= 1
         if len(module.activations) == 0:
             if hasattr(module, "max_batch_len"):
                 del module.max_batch_len

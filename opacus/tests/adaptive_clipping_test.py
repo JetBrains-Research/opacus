@@ -53,29 +53,28 @@ class BaseAdaClipTest:
 
         # Use hooks mode if wrap_model is False
         if not self.WRAP_MODEL:
-            # Hooks-based mode with wrap_model=False
-            # When wrap_model=False, make_private returns (model, optimizer, dataloader)
-            # and stores the hooks on model._opacus_hooks
-            model, optimizer, dataloader = privacy_engine.make_private(
+            # Non-wrapping mode: make_private returns (hooks, optimizer, dataloader)
+            # Model is unchanged - we already have it
+            hooks, optimizer, dataloader = privacy_engine.make_private(
                 module=model,
                 optimizer=optimizer,
                 data_loader=self.dataloader,
                 wrap_model=False,
                 **kwargs,
             )
-            # Extract hooks from model
-            hooks = model._opacus_hooks
+            # Return model (unchanged), optimizer, dataloader, and hooks for cleanup
             return model, optimizer, dataloader, hooks
         else:
-            # Standard wrapped mode
-            model, optimizer, dataloader = privacy_engine.make_private(
+            # Wrapped mode: make_private returns (wrapper, optimizer, dataloader)
+            wrapper, optimizer, dataloader = privacy_engine.make_private(
                 module=model,
                 optimizer=optimizer,
                 data_loader=self.dataloader,
                 wrap_model=True,
                 **kwargs,
             )
-            return model, optimizer, dataloader, None
+            # In wrapped mode, wrapper IS both the model and hooks
+            return wrapper, optimizer, dataloader, None
 
     def test_adaclip_optimizer_initialization(self):
         """Test that AdaClipDPOptimizer can be initialized."""
@@ -85,7 +84,7 @@ class BaseAdaClipTest:
         # Make private with AdaClip optimizer
         # Note: noise_multiplier must be < 2 * unclipped_num_std (AdaClip constraint)
         unclipped_num_std = 1.0
-        model, optimizer, dataloader, self.controller = self._make_private(
+        model, optimizer, dataloader, self.hooks = self._make_private(
             model=model,
             optimizer=optimizer,
             noise_multiplier=0.5,  # < 2 * unclipped_num_std (1.0)
@@ -115,7 +114,7 @@ class BaseAdaClipTest:
         model = SimpleNet()
         optimizer = torch.optim.SGD(model.parameters(), lr=self.LR)
 
-        model, optimizer, dataloader, self.controller = self._make_private(
+        model, optimizer, dataloader, self.hooks = self._make_private(
             model=model,
             optimizer=optimizer,
             noise_multiplier=0.0,  # No noise for clearer results
@@ -166,7 +165,7 @@ class BaseAdaClipTest:
         optimizer = torch.optim.SGD(model.parameters(), lr=self.LR)
 
         unclipped_num_std = 1.0
-        model, optimizer, dataloader, self.controller = self._make_private(
+        model, optimizer, dataloader, self.hooks = self._make_private(
             model=model,
             optimizer=optimizer,
             noise_multiplier=0.8,  # < 2 * unclipped_num_std (0.8 < 1.0)
@@ -247,7 +246,7 @@ class BaseAdaClipTest:
 
         target_quantile = 0.7
         unclipped_num_std = 0.5
-        model, optimizer, dataloader, self.controller = self._make_private(
+        model, optimizer, dataloader, self.hooks = self._make_private(
             model=model,
             optimizer=optimizer,
             noise_multiplier=0.8,  # < 2 * unclipped_num_std (0.8 < 1.0)

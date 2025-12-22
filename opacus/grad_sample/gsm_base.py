@@ -15,75 +15,168 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import torch.nn as nn
 from opacus.utils.module_utils import trainable_parameters
-from torch.utils.hooks import RemovableHandle
 
 
 logger = logging.getLogger(__name__)
 
-OPACUS_PARAM_MONKEYPATCH_ATTRS = [
-    "grad_sample",
-    "_forward_counter",
-    "_current_grad_sample",
-    "_norm_sample",
-]
 
+class AbstractGradSampleHooks(ABC):
+    """
+    Abstract base class for managing grad sample computation via hooks.
 
-class AbstractGradSampleModule(nn.Module, ABC):
-    r"""
-    Extends nn.Module so that its parameter tensors have an extra field called .grad_sample.
+    Defines the interface for:
+    - Clearing/deleting grad sample attributes
+    - Managing gradient accumulation
+    - Cleanup
     """
 
     def __init__(
         self,
         m: nn.Module,
         *,
-        batch_first=True,
-        loss_reduction="mean",
+        batch_first: bool = True,
+        loss_reduction: str = "mean",
         **kwargs,
     ):
         """
+        Initialize hooks with the module and configuration.
 
         Args:
-            m: nn.Module to be wrapped
-            batch_first: Flag to indicate if the input tensor to the corresponding module
-                has the first dimension representing the batch. If set to True, dimensions on
-                input tensor are expected be ``[batch_size, ...]``, otherwise
-                ``[K, batch_size, ...]``
-            loss_reduction: Indicates if the loss reduction (for aggregating the gradients)
-                is a sum or a mean operation. Can take values "sum" or "mean"
-            **kwargs: Additional keyword arguments passed to the parent class
-
-        Raises:
-            NotImplementedError
-                If ``strict`` is set to ``True`` and module ``m`` (or any of its
-                submodules) doesn't have a registered grad sampler function.
+            m: nn.Module to attach hooks to
+            batch_first: Flag to indicate if the input tensor has batch as first dimension
+            loss_reduction: Indicates if the loss reduction is "sum" or "mean"
+            **kwargs: Extra arguments
         """
-        super().__init__()
-
         self._module = m
         self.batch_first = batch_first
         self.loss_reduction = loss_reduction
-        self.grad_accumulation_hook: Optional[RemovableHandle] = None
 
-        for _, p in trainable_parameters(self):
+        for _, p in trainable_parameters(self._module):
+            self.initialize_parameter(p)
+        super().__init__(**kwargs)
+
+    def initialize_parameter(self, p: nn.Parameter):
+        """
+        Initializes parameters with required attributes.
+        Can be overridden by subclasses to add more attributes.
+
+        Args:
+            p: nn.Parameter to initialize
+        """
+        p.grad_sample = None
+        p._forward_counter = 0
+
+    def set_grad_sample_to_none(self):
+        """
+        Sets ``.grad_sample`` and related attributes to None.
+        """
+        for p in self._module.parameters():
+            self._set_param_grad_sample_to_none(p)
+
+    def _set_param_grad_sample_to_none(self, p: nn.Parameter):
+        """
+        Sets ``.grad_sample`` and related attributes to None for a given parameter.
+        Can be overridden by subclasses to handle their specific attributes.
+
+        Args:
+            p: nn.Parameter
+        """
+        if hasattr(p, "grad_sample"):
             p.grad_sample = None
+        if hasattr(p, "_forward_counter"):
             p._forward_counter = 0
+
+    def del_grad_sample(self):
+        """
+        Deletes ``.grad_sample`` and related attributes from all model parameters.
+        """
+        for p in self._module.parameters():
+            self._del_param_grad_sample(p)
+
+    def _del_param_grad_sample(self, p: nn.Parameter):
+        """
+        Deletes ``.grad_sample`` and related attributes from a given parameter.
+        Can be overridden by subclasses to handle their specific attributes.
+
+        Args:
+            p: nn.Parameter
+        """
+        if hasattr(p, "grad_sample"):
+            delattr(p, "grad_sample")
+        if hasattr(p, "_forward_counter"):
+            delattr(p, "_forward_counter")
+
+    def forbid_grad_accumulation(self):
+        """
+        Forbid gradient accumulation (multiple backward passes without zero_grad).
+        """
+        pass
+
+    def allow_grad_accumulation(self):
+        """
+        Allow gradient accumulation.
+        """
+        pass
+
+    def cleanup(self):
+        """
+        Remove all hooks and clean up all attributes.
+        """
+        self.del_grad_sample()
+
+
+class AbstractGradSampleModule(nn.Module, AbstractGradSampleHooks, ABC):
+    r"""
+    Lightweight nn.Module wrapper that delegates to AbstractGradSampleHooks.
+
+    This class provides the nn.Module interface (forward, zero_grad, parameters, etc.)
+    while delegating all grad sample management to the hooks implementation.
+
+    The hooks implementation (AbstractGradSampleHooks) owns the actual module and
+    manages all grad sample attributes.
+    """
+
+    def __init__(
+        self,
+        m: nn.Module,
+        *,
+        batch_first: bool = True,
+        loss_reduction: str = "mean",
+        **kwargs,
+    ):
+        """
+        Initialize the nn.Module wrapper.
+
+        Args:
+            m: nn.Module to wrap
+            batch_first: Flag to indicate if the input tensor has batch as first dimension
+            loss_reduction: Indicates if the loss reduction is "sum" or "mean"
+            **kwargs: Extra arguments passed to AbstractGradSampleHooks
+        """
+        nn.Module.__init__(self)
+        AbstractGradSampleHooks.__init__(
+            self, m, batch_first=batch_first, loss_reduction=loss_reduction, **kwargs
+        )
 
     @abstractmethod
     def forward(self, *args, **kwargs):
+        """
+        Forward pass. Should delegate to self._module which is provided
+        by the hooks implementation.
+        """
         pass
 
     def __getattr__(self, item):
         try:
             return super().__getattr__(item)
         except AttributeError as e:
-            submodules = dict(self._module.named_modules())
-            if item and item in submodules:
-                return submodules[item]
+            if hasattr(self, "_module"):
+                submodules = dict(self._module.named_modules())
+                if item and item in submodules:
+                    return submodules[item]
             raise e
 
     def zero_grad(self, set_to_none: bool = False):
@@ -112,20 +205,6 @@ class AbstractGradSampleModule(nn.Module, ABC):
         self.set_grad_sample_to_none()
         super().zero_grad(set_to_none)
 
-    def set_grad_sample_to_none(self):
-        """
-        Sets ``.grad_sample`` to None
-        """
-        for p in self.parameters():
-            p.grad_sample = None
-
-    def del_grad_sample(self):
-        """
-        Deleted ``.grad_sample`` attribute from all model parameters
-        """
-        for p in self.parameters():
-            del p.grad_sample
-
     def to_standard_module(self) -> nn.Module:
         """
         Returns the standard nn.Module wrapped by this, eliminating all traces
@@ -138,35 +217,8 @@ class AbstractGradSampleModule(nn.Module, ABC):
         return self._module
 
     def _close(self):
-        # Clean up attributes
-        for attr in OPACUS_PARAM_MONKEYPATCH_ATTRS:
-            for p in self.parameters():
-                if hasattr(p, attr):
-                    delattr(p, attr)
+        """Clean up by calling hooks cleanup method."""
+        self.cleanup()
 
     def __repr__(self):
         return f"{type(self).__name__}({self._module.__repr__()})"
-
-    def forbid_grad_accumulation(self):
-        """
-        Sets a flag to detect gradient accumulation (multiple forward/backward passes
-        without an optimizer step or clearing out gradients).
-
-        When set, GradSampleModule will throw a ValueError on the second backward pass.
-
-        Note: This is a no-op in the base class. Subclasses that support grad accumulation
-        detection (like GradSampleModule with hooks) should override this.
-        """
-        # No-op for modules that don't support grad accumulation detection
-        return
-
-    def allow_grad_accumulation(self):
-        """
-        Unsets a flag to detect gradient accumulation (multiple forward/backward passes
-        without an optimizer step or clearing out gradients).
-
-        Note: This is a no-op in the base class. Subclasses that support grad accumulation
-        detection (like GradSampleModule with hooks) should override this.
-        """
-        # No-op for modules that don't support grad accumulation detection
-        return

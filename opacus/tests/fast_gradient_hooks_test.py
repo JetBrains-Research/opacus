@@ -17,7 +17,7 @@ import unittest
 
 import torch
 import torch.nn as nn
-from opacus.grad_sample import FastGradientHooks, GradSampleModule
+from opacus.grad_sample import FastGradientHooks
 from opacus.grad_sample.grad_sample_module_fast_gradient_clipping import (
     GradSampleModuleFastGradientClipping,
 )
@@ -244,9 +244,7 @@ class FastGradientHooksTest(unittest.TestCase):
         norm_wrapped = wrapped.get_norm_sample()
 
         # Norms should be very close
-        self.assertTrue(
-            torch.allclose(norm_hooks, norm_wrapped, rtol=1e-4, atol=1e-4)
-        )
+        self.assertTrue(torch.allclose(norm_hooks, norm_wrapped, rtol=1e-4, atol=1e-4))
 
         # Clean up
         hooks.cleanup()

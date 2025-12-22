@@ -83,6 +83,11 @@ class TPHooks(FastGradientHooks):
                     else:
                         param.merge_flag = True
 
+    def _del_param_grad_sample(self, p: nn.Parameter):
+        super()._del_param_grad_sample(p)
+        if hasattr(p, "merge_flag"):
+            delattr(p, "merge_flag")
+
     def get_norm_sample(self) -> torch.Tensor:
         """Get per-example gradient norms."""
         current_rank = torch.distributed.get_rank()

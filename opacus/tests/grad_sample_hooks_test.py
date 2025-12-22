@@ -62,9 +62,7 @@ class GradSampleHooksTest(unittest.TestCase):
     def setUp(self):
         self.original_model = SampleConvNet()
         self.hooks_model = SampleConvNet()
-        self.hooks_model.load_state_dict(
-            self.original_model.state_dict(), strict=True
-        )
+        self.hooks_model.load_state_dict(self.original_model.state_dict(), strict=True)
 
         self.grad_sample_hooks = self.CLS(
             self.hooks_model, batch_first=True, loss_reduction="mean"
@@ -255,9 +253,7 @@ class GradSampleHooksTest(unittest.TestCase):
         """Test that state_dict can be loaded without _module prefix."""
         hooks_state_dict = self.hooks_model.state_dict()
         new_model = SampleConvNet()
-        new_hooks = GradSampleHooks(
-            new_model, batch_first=False, loss_reduction="mean"
-        )
+        new_hooks = GradSampleHooks(new_model, batch_first=False, loss_reduction="mean")
 
         # Should be able to load directly (no _module prefix)
         new_model.load_state_dict(hooks_state_dict)
@@ -359,9 +355,7 @@ class FastGradientHooksTestUnit(GradSampleHooksTest):
         """Set up with ghost clipping hooks."""
         self.original_model = SampleConvNet()
         self.hooks_model = SampleConvNet()
-        self.hooks_model.load_state_dict(
-            self.original_model.state_dict(), strict=True
-        )
+        self.hooks_model.load_state_dict(self.original_model.state_dict(), strict=True)
 
         # Ghost clipping requires max_grad_norm
         self.grad_sample_hooks = self.CLS(

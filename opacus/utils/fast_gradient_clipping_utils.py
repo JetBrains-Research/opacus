@@ -24,7 +24,7 @@ class DPTensorFastGradientClipping:
 
     def __init__(
         self,
-        module,  # Union[GradSampleModuleFastGradientClipping, GradSampleControllerFastGradientClipping]
+        module,  # Union[GradSampleModuleFastGradientClipping, FastGradientHooks]
         optimizer: DPOptimizerFastGradientClipping,
         loss_per_sample: torch.Tensor,
         loss_reduction: str = "mean",
@@ -32,7 +32,7 @@ class DPTensorFastGradientClipping:
         """
 
         Args:
-            module: the module or controller to train (GradSampleModuleFastGradientClipping or GradSampleControllerFastGradientClipping)
+            module: the module or hooks to train (GradSampleModuleFastGradientClipping or FastGradientHooks)
             optimizer: the optimizer used to train the module
             loss_per_sample: loss on each sample in the mini-batch of size [batch_size, 1]
 
@@ -203,7 +203,7 @@ class DPLossFastGradientClipping:
 
     def __init__(
         self,
-        module,  # Union[GradSampleModuleFastGradientClipping, GradSampleControllerFastGradientClipping]
+        module,  # Union[GradSampleModuleFastGradientClipping, FastGradientHooks]
         optimizer: DPOptimizerFastGradientClipping,
         criterion,
         loss_reduction: str = "mean",

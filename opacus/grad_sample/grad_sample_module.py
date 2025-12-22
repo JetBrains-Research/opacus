@@ -22,7 +22,10 @@ from typing import Iterable, List, Tuple
 import torch
 import torch.nn as nn
 from opacus.grad_sample.functorch import ft_compute_per_sample_gradient, prepare_layer
-from opacus.grad_sample.gsm_base import AbstractGradSampleModule
+from opacus.grad_sample.gsm_base import (
+    AbstractGradSampleHooks,
+    AbstractGradSampleModule,
+)
 from opacus.layers.dp_rnn import DPGRU, DPLSTM, DPRNN, RNNLinear
 from opacus.utils.module_utils import (
     has_trainable_params,
@@ -36,14 +39,6 @@ from torch.utils.hooks import RemovableHandle
 
 logger = logging.getLogger(__name__)
 logger.disabled = True
-
-
-OPACUS_PARAM_MONKEYPATCH_ATTRS = [
-    "grad_sample",
-    "_forward_counter",
-    "_current_grad_sample",
-    "_norm_sample",
-]
 
 
 def create_or_accumulate_grad_sample(
@@ -73,7 +68,7 @@ def create_or_accumulate_grad_sample(
 
 
 def promote_current_grad_sample(p: nn.Parameter) -> None:
-    if p.requires_grad:
+    if p.requires_grad and hasattr(p, "_current_grad_sample"):
         if p.grad_sample is not None:
             if isinstance(p.grad_sample, list):
                 p.grad_sample.append(p._current_grad_sample)
@@ -85,7 +80,7 @@ def promote_current_grad_sample(p: nn.Parameter) -> None:
         del p._current_grad_sample
 
 
-class GradSampleHooks:
+class GradSampleHooks(AbstractGradSampleHooks):
     """
     Class containing hook logic for computing per-sample gradients.
 
@@ -94,6 +89,8 @@ class GradSampleHooks:
     - Capturing activations during forward pass
     - Computing gradients during backward pass
     - Managing hook lifecycle
+
+    Implements AbstractGradSampleHooks interface for attribute management.
     """
 
     GRAD_SAMPLERS = {}
@@ -115,20 +112,16 @@ class GradSampleHooks:
                 "Using non-strict mode, continuing"
             )
 
-        self._module = m
+        # Initialize base hooks (sets _module, batch_first, loss_reduction, and parameter attributes)
+        super().__init__(m, batch_first=batch_first, loss_reduction=loss_reduction)
+
+        # GradSampleHooks-specific attributes
         self.hooks_enabled = False
         self.grad_accumulation_allowed = True
-        self.batch_first = batch_first
-        self.loss_reduction = loss_reduction
         self.force_functorch = force_functorch
 
         if not hasattr(self, "autograd_grad_sample_hooks"):
             self.autograd_grad_sample_hooks: List[RemovableHandle] = []
-
-        # Initialize parameters with required attributes
-        for _, p in trainable_parameters(self._module):
-            p.grad_sample = None
-            p._forward_counter = 0
 
         # Add the hooks
         self.add_hooks()
@@ -264,6 +257,14 @@ class GradSampleHooks:
             batch_first=batch_first,
         )
 
+        self.compute_sample_gradients(module, activations, backprops)
+
+    def compute_sample_gradients(
+        self,
+        module: nn.Module,
+        activations: List[torch.Tensor],
+        backprops: torch.Tensor,
+    ):
         if not self.force_functorch and type(module) in self.GRAD_SAMPLERS:
             grad_sampler_fn = self.GRAD_SAMPLERS[type(module)]
         else:
@@ -271,10 +272,18 @@ class GradSampleHooks:
 
         grad_samples = grad_sampler_fn(module, activations, backprops)
         for param, gs in grad_samples.items():
-            create_or_accumulate_grad_sample(
-                param=param, grad_sample=gs, max_batch_len=module.max_batch_len
-            )
+            self._process_grad_sample(param, gs, module.max_batch_len)
 
+        self._on_gradients_computed(module)
+
+    def _process_grad_sample(
+        self, param: nn.Parameter, grad_sample: torch.Tensor, max_batch_len: int
+    ):
+        create_or_accumulate_grad_sample(
+            param=param, grad_sample=grad_sample, max_batch_len=max_batch_len
+        )
+
+    def _on_gradients_computed(self, module: nn.Module):
         # Detect end of current batch processing
         for _, p in trainable_parameters(module):
             p._forward_counter -= 1
@@ -369,14 +378,19 @@ class GradSampleHooks:
             return errors
 
     def cleanup(self):
-        """Clean up all hooks and attributes added to the model."""
+        """Clean up all hooks and attributes added by GradSampleHooks."""
         self.remove_hooks()
+        self.del_grad_sample()
 
-        # Clean up parameter attributes
-        for attr in OPACUS_PARAM_MONKEYPATCH_ATTRS:
-            for p in self._module.parameters():
-                if hasattr(p, attr):
-                    delattr(p, attr)
+    def _set_param_grad_sample_to_none(self, p: nn.Parameter):
+        super()._set_param_grad_sample_to_none(p)
+        if hasattr(p, "_current_grad_sample"):
+            p._current_grad_sample = None
+
+    def _del_param_grad_sample(self, p: nn.Parameter):
+        super()._del_param_grad_sample(p)
+        if hasattr(p, "_current_grad_sample"):
+            delattr(p, "_current_grad_sample")
 
 
 class GradSampleModule(GradSampleHooks, AbstractGradSampleModule):
@@ -391,10 +405,10 @@ class GradSampleModule(GradSampleHooks, AbstractGradSampleModule):
         self,
         m: nn.Module,
         *,
-        batch_first=True,
-        loss_reduction="mean",
+        batch_first: bool = True,
+        loss_reduction: str = "mean",
         strict: bool = True,
-        force_functorch=False,
+        force_functorch: bool = False,
         **kwargs,
     ):
         """
@@ -424,16 +438,8 @@ class GradSampleModule(GradSampleHooks, AbstractGradSampleModule):
                 If ``strict`` is set to ``True`` and module ``m`` (or any of its
                 submodules) includes a buffer.
         """
-        AbstractGradSampleModule.__init__(
-            self,
-            m,
-            batch_first=batch_first,
-            loss_reduction=loss_reduction,
-            **kwargs,
-        )
-        GradSampleHooks.__init__(
-            self,
-            m,
+        super().__init__(
+            m=m,
             batch_first=batch_first,
             loss_reduction=loss_reduction,
             strict=strict,
@@ -441,12 +447,11 @@ class GradSampleModule(GradSampleHooks, AbstractGradSampleModule):
             **kwargs,
         )
 
+        # Module-specific attributes
+        self.grad_accumulation_hook = None
+
     def forward(self, *args, **kwargs):
         return self._module(*args, **kwargs)
-
-    def _close(self):
-        AbstractGradSampleModule._close(self)
-        self.remove_hooks()
 
 
 def _get_batch_size(*, module: nn.Module, batch_dim: int) -> int:

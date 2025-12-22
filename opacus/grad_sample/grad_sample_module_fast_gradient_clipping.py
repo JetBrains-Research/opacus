@@ -20,13 +20,7 @@ from typing import List
 
 import torch
 import torch.nn as nn
-from opacus.grad_sample.functorch import ft_compute_per_sample_gradient
-from opacus.grad_sample.grad_sample_module import (
-    GradSampleHooks,
-    GradSampleModule,
-    create_or_accumulate_grad_sample,
-    promote_current_grad_sample,
-)
+from opacus.grad_sample.grad_sample_module import GradSampleHooks, GradSampleModule
 from opacus.utils.module_utils import (
     has_trainable_params,
     requires_grad,
@@ -103,9 +97,6 @@ class FastGradientHooks(GradSampleHooks):
         self.use_ghost_clipping = use_ghost_clipping
         self._per_sample_gradient_norms = None
 
-        for _, p in trainable_parameters(self._module):
-            p._norm_sample = None
-
         self.trainable_parameters = [p for _, p in trainable_parameters(self._module)]
 
         if logger.isEnabledFor(logging.INFO):
@@ -114,6 +105,20 @@ class FastGradientHooks(GradSampleHooks):
                 force_functorch=force_functorch,
                 use_ghost_clipping=use_ghost_clipping,
             )
+
+    def initialize_parameter(self, p: nn.Parameter):
+        super().initialize_parameter(p)
+        p._norm_sample = None
+
+    def _set_param_grad_sample_to_none(self, p: nn.Parameter):
+        super()._set_param_grad_sample_to_none(p)
+        if hasattr(p, "_norm_sample"):
+            p._norm_sample = None
+
+    def _del_param_grad_sample(self, p: nn.Parameter):
+        super()._del_param_grad_sample(p)
+        if hasattr(p, "_norm_sample"):
+            delattr(p, "_norm_sample")
 
     def get_clipping_coef(self) -> torch.Tensor:
         """Get clipping coefficient for ghost clipping."""
@@ -197,16 +202,23 @@ class FastGradientHooks(GradSampleHooks):
             for temp in activations
         ]
 
+        self.compute_sample_gradients(module, activations, backprops)
+
+    def compute_sample_gradients(self, module, activations, backprops):
         if self.use_ghost_clipping and type(module) in self.NORM_SAMPLERS:
             self._compute_ghost_grad_sample_norms(module, activations, backprops)
+            self._on_gradients_computed(module)
         else:
-            self._compute_fast_grad_sample_norms(
-                module, activations, backprops, promote_current_grad_sample
-            )
+            super().compute_sample_gradients(module, activations, backprops)
 
-        if len(module.activations) == 0:
-            if hasattr(module, "max_batch_len"):
-                del module.max_batch_len
+    def _process_grad_sample(
+        self, param: nn.Parameter, grad_sample: torch.Tensor, max_batch_len: int
+    ):
+        super()._process_grad_sample(param, grad_sample, max_batch_len)
+        # Also create norm sample for fast gradient clipping
+        create_norm_sample(
+            param=param, grad_sample=grad_sample, max_batch_len=max_batch_len
+        )
 
     def _compute_ghost_grad_sample_norms(self, module, activations, backprops):
         # Ghost clipping: compute norms directly
@@ -216,41 +228,6 @@ class FastGradientHooks(GradSampleHooks):
         for param, ns in norm_samples.items():
             if param.requires_grad:
                 param._norm_sample = ns
-                param._forward_counter -= 1
-
-    def _compute_fast_grad_sample_norms(
-        self, module, activations, backprops, promote_current_grad_sample
-    ):
-        # Fast gradient clipping: materialize gradients then compute norms
-        if not self.force_functorch and type(module) in self.GRAD_SAMPLERS:
-            grad_sampler_fn = self.GRAD_SAMPLERS[type(module)]
-        else:
-            grad_sampler_fn = ft_compute_per_sample_gradient
-
-        grad_samples = grad_sampler_fn(module, activations, backprops)
-
-        for param, gs in grad_samples.items():
-            create_or_accumulate_grad_sample(
-                param=param, grad_sample=gs, max_batch_len=module.max_batch_len
-            )
-            # Also create norm sample for fast gradient clipping
-            create_norm_sample(
-                param=param, grad_sample=gs, max_batch_len=module.max_batch_len
-            )
-
-        # Detect end of current batch processing
-        for _, p in trainable_parameters(module):
-            p._forward_counter -= 1
-            if p._forward_counter == 0:
-                promote_current_grad_sample(p)
-
-            if not self.grad_accumulation_allowed:
-                if isinstance(p.grad_sample, list) and len(p.grad_sample) > 1:
-                    raise ValueError(
-                        "Poisson sampling is not compatible with grad accumulation. "
-                        "You need to call optimizer.step() after every forward/backward pass "
-                        "or consider using BatchMemoryManager"
-                    )
 
     def log_module_gradient_sample_mode(
         self, module: nn.Module, *, force_functorch=False, use_ghost_clipping=True

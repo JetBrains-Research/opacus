@@ -70,7 +70,7 @@ class BasePrivacyEngineTest(ABC):
         self.BATCH_FIRST = True
         self.GRAD_SAMPLE_MODE = "hooks"
         self.WRAP_MODEL = (
-            True  # Default to True, override in subclasses for controller mode
+            True  # Default to True, override in subclasses for non-wrapping mode
         )
 
         torch.manual_seed(42)
@@ -136,7 +136,11 @@ class BasePrivacyEngineTest(ABC):
             max_grad_norm = [max_grad_norm] * num_layers
 
         privacy_engine = PrivacyEngine(secure_mode=secure_mode)
-        model, optimizer, poisson_dl = privacy_engine.make_private(
+
+        # Keep reference to original model for non-wrapping mode
+        original_model = model
+
+        hooks_or_wrapper, optimizer, poisson_dl = privacy_engine.make_private(
             module=model,
             optimizer=optimizer,
             data_loader=dl,
@@ -149,7 +153,13 @@ class BasePrivacyEngineTest(ABC):
             wrap_model=self.WRAP_MODEL,
         )
 
-        return model, optimizer, poisson_dl, privacy_engine
+        # In non-wrapping mode, use original model; in wrapped mode, use wrapper
+        if self.WRAP_MODEL:
+            model_to_use = hooks_or_wrapper
+        else:
+            model_to_use = original_model
+
+        return model_to_use, optimizer, poisson_dl, privacy_engine
 
     def _train_steps(
         self,

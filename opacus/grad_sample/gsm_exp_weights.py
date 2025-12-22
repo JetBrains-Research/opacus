@@ -38,14 +38,32 @@ class GradSampleModuleExpandedWeights(AbstractGradSampleModule):
             raise NotImplementedError
 
         super().__init__(
-            m,
+            m=m,
             batch_first=batch_first,
             loss_reduction=loss_reduction,
         )
         # Note: strict parameter is accepted for compatibility but not used
         # in ExpandedWeights implementation
+        self.grad_accumulation_allowed = True
+
+    def forbid_grad_accumulation(self):
+        """Forbid gradient accumulation (for Poisson sampling)."""
+        self.grad_accumulation_allowed = False
+
+    def allow_grad_accumulation(self):
+        """Allow gradient accumulation."""
+        self.grad_accumulation_allowed = True
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
+        if not self.grad_accumulation_allowed:
+            for p in self._module.parameters():
+                if hasattr(p, "grad_sample") and p.grad_sample is not None:
+                    raise ValueError(
+                        "Poisson sampling is not compatible with grad accumulation. "
+                        "You need to call optimizer.step() after every forward/backward pass "
+                        "or consider using BatchMemoryManager"
+                    )
+
         from torch.nn.utils._per_sample_grad import call_for_per_sample_grads
 
         return call_for_per_sample_grads(

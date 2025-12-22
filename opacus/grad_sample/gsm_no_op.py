@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
 import torch.nn as nn
 from opacus.grad_sample.gsm_base import AbstractGradSampleModule
 
@@ -36,10 +35,10 @@ class GradSampleModuleNoOp(AbstractGradSampleModule):
             raise NotImplementedError
 
         super().__init__(
-            m,
+            m=m,
             batch_first=batch_first,
             loss_reduction=loss_reduction,
         )
 
-    def forward(self, x: torch.Tensor, *args, **kwargs):
-        return self._module.forward(x, *args, **kwargs)
+    def forward(self, *args, **kwargs):
+        return self._module(*args, **kwargs)
