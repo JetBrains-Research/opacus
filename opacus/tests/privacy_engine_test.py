@@ -69,7 +69,9 @@ class BasePrivacyEngineTest(ABC):
         self.criterion = nn.CrossEntropyLoss()
         self.BATCH_FIRST = True
         self.GRAD_SAMPLE_MODE = "hooks"
-        self.RETURN_CONTROLLER = False  # Override in subclasses for controller mode
+        self.WRAP_MODEL = (
+            True  # Default to True, override in subclasses for controller mode
+        )
 
         torch.manual_seed(42)
 
@@ -144,7 +146,7 @@ class BasePrivacyEngineTest(ABC):
             poisson_sampling=poisson_sampling,
             clipping=clipping,
             grad_sample_mode=grad_sample_mode,
-            return_controller=self.RETURN_CONTROLLER,
+            wrap_model=self.WRAP_MODEL,
         )
 
         return model, optimizer, poisson_dl, privacy_engine
@@ -1034,7 +1036,7 @@ class PrivacyEngineConvNetControllerTest(PrivacyEngineConvNetTest):
 
     def setUp(self) -> None:
         super().setUp()
-        self.RETURN_CONTROLLER = True
+        self.WRAP_MODEL = False
 
     def tearDown(self) -> None:
         """Clean up controller hooks after each test."""
@@ -1047,7 +1049,7 @@ class PrivacyEngineConvNetFrozenControllerTest(PrivacyEngineConvNetFrozenTest):
 
     def setUp(self) -> None:
         super().setUp()
-        self.RETURN_CONTROLLER = True
+        self.WRAP_MODEL = False
 
     def tearDown(self) -> None:
         """Clean up controller hooks after each test."""
@@ -1059,7 +1061,7 @@ class PrivacyEngineTextControllerTest(PrivacyEngineTextTest):
 
     def setUp(self) -> None:
         super().setUp()
-        self.RETURN_CONTROLLER = True
+        self.WRAP_MODEL = False
 
     def tearDown(self) -> None:
         """Clean up controller hooks after each test."""
@@ -1071,7 +1073,7 @@ class PrivacyEngineTiedWeightsControllerTest(PrivacyEngineTiedWeightsTest):
 
     def setUp(self) -> None:
         super().setUp()
-        self.RETURN_CONTROLLER = True
+        self.WRAP_MODEL = False
 
     def tearDown(self) -> None:
         """Clean up controller hooks after each test."""

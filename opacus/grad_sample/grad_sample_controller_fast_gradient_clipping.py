@@ -23,17 +23,11 @@ combining the benefits of:
 """
 
 import logging
-from typing import List
 
-import torch
 import torch.nn as nn
 from opacus.grad_sample.grad_sample_controller import GradSampleController
-from opacus.grad_sample.grad_sample_hooks_mixin import (
-    GradSampleFastGradientClippingMixin,
-    create_norm_sample,
-)
-from opacus.layers.dp_rnn import DPGRU, DPLSTM, DPRNN
-from opacus.utils.module_utils import trainable_modules, trainable_parameters
+from opacus.grad_sample.grad_sample_hooks_mixin import FastGradientHooksHandler
+from opacus.utils.module_utils import trainable_parameters
 
 
 logger = logging.getLogger(__name__)
@@ -41,7 +35,7 @@ logger.disabled = True
 
 
 class GradSampleControllerFastGradientClipping(
-    GradSampleController, GradSampleFastGradientClippingMixin
+    GradSampleController, FastGradientHooksHandler
 ):
     """
     Controller for managing privacy hooks with Fast Gradient and Ghost Clipping support
@@ -125,93 +119,3 @@ class GradSampleControllerFastGradientClipping(
                 force_functorch=force_functorch,
                 use_ghost_clipping=use_ghost_clipping,
             )
-
-    def get_clipping_coef(self) -> torch.Tensor:
-        """Get per-example gradient scaling factor for clipping."""
-        norm_sample = self.get_norm_sample()
-        return (self.max_grad_norm / (norm_sample + 1e-6)).clamp(max=1.0)
-
-    def get_norm_sample(self) -> torch.Tensor:
-        """Get per-example gradient norms."""
-        norm_sample = torch.stack(
-            [param._norm_sample for param in self.trainable_parameters], dim=0
-        ).norm(2, dim=0)
-        self.per_sample_gradient_norms = norm_sample
-        return norm_sample
-
-    def capture_activations_hook(
-        self,
-        module: nn.Module,
-        forward_input: List[torch.Tensor],
-        _forward_output: torch.Tensor,
-    ):
-        """
-        Override parent method to add parameter tying check for ghost clipping.
-        """
-        # Call parent implementation
-        super().capture_activations_hook(module, forward_input, _forward_output)
-
-        # Add ghost clipping specific check for parameter tying
-        if self.hooks_enabled:
-            for _, p in trainable_parameters(module):
-                if (
-                    self.use_ghost_clipping
-                    and p._forward_counter > 1
-                    and type(module) in self.NORM_SAMPLERS
-                ):
-                    raise NotImplementedError(
-                        "Parameter tying is not supported with Ghost Clipping"
-                    )
-
-    # Note: capture_backprops_hook is inherited from GradSampleFastGradientClippingMixin
-
-    def log_module_gradient_sample_mode(
-        self, module: nn.Module, *, force_functorch=False, use_ghost_clipping=True
-    ):
-        """
-        Add logs to track gradient sample mode for each part of the module, including 1) Ghost Clipping, 2) Fast Gradient Clipping (hook mode), and 3) Fast Gradient Clipping (functorch mode).
-
-        Args:
-            module: nn.Module to be checked
-            force_functorch: If set to ``True``, will use functorch to compute
-                all per sample gradients. Otherwise, functorch will be used only
-                for layers without registered grad sampler methods.
-            use_ghost_clipping: If set to ``True``, Ghost Clipping
-                will be used for clipping gradients of supported layers. If ``False``, Fast
-                Gradient Clipping will be used for all layers.
-        """
-        for m_name, m in trainable_modules(module):
-            if type(m) in [DPRNN, DPLSTM, DPGRU]:
-                logger.info(
-                    f"Module name: {m_name}, module type: {type(m)}. No hook or functorch is added."
-                )
-
-            elif use_ghost_clipping and type(m) in self.NORM_SAMPLERS:
-                logger.info(
-                    f"Module name: {m_name}, module type: {type(m)}, under Ghost Clipping."
-                )
-
-            else:
-                if not force_functorch and type(m) in self.GRAD_SAMPLERS:
-                    # When functorch is not enforced, use FGC (hook mode) if the layer has a registered grad_sampler (supported). Otherwise, use FGC (functorch mode).
-                    logger.info(
-                        f"Module name: {m_name}, module type: {type(m)}, under Fast Gradient Clipping (hook mode)."
-                    )
-                else:
-                    logger.info(
-                        f"Module name: {m_name}, module type: {type(m)}, under Fast Gradient Clipping (functorch mode)."
-                    )
-
-    @property
-    def per_sample_gradient_norms(self) -> torch.Tensor:
-        """Returns per sample gradient norms. Note that these are not privatized and should only be used for debugging purposes or in non-private settings"""
-        if self._per_sample_gradient_norms is not None:
-            return self._per_sample_gradient_norms
-        else:
-            raise AttributeError(
-                "per_sample_gradient_norms is not set. Please call forward and backward on the model before accessing this property."
-            )
-
-    @per_sample_gradient_norms.setter
-    def per_sample_gradient_norms(self, value):
-        self._per_sample_gradient_norms = value

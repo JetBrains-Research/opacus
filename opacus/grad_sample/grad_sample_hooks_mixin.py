@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 logger.disabled = True
 
 
-class GradSampleHooksMixin:
+class HooksHandler:
     """
     Mixin class containing common hook logic shared between GradSampleModule and GradSampleController.
 
@@ -156,7 +156,6 @@ class GradSampleHooksMixin:
         """
         # Import here to avoid circular dependency
         from opacus.grad_sample.grad_sample_module import (
-            _get_batch_size,
             create_or_accumulate_grad_sample,
             promote_current_grad_sample,
         )
@@ -310,15 +309,65 @@ def create_norm_sample(
             )
 
 
-class GradSampleFastGradientClippingMixin(GradSampleHooksMixin):
+class FastGradientHooksHandler(HooksHandler):
     """
     Mixin for Fast Gradient and Ghost Clipping support.
 
-    Extends GradSampleHooksMixin to add ghost clipping capabilities for
+    Extends HooksHandler to add ghost clipping capabilities for
     memory-efficient gradient norm computation.
     """
 
     NORM_SAMPLERS = {}
+
+    def get_clipping_coef(self) -> torch.Tensor:
+        """Get clipping coefficient for ghost clipping."""
+        norm_sample = self.get_norm_sample()
+        return (self.max_grad_norm / (norm_sample + 1e-6)).clamp(max=1.0)
+
+    def get_norm_sample(self) -> torch.Tensor:
+        """Get per-example gradient norms."""
+        squared_norm_sample = (
+            torch.stack(
+                [param._norm_sample for param in self.trainable_parameters],
+                dim=0,
+            )
+            .norm(2, dim=0)
+            .square()
+        )
+
+        return squared_norm_sample.sqrt()
+
+    def capture_activations_hook(
+        self,
+        module: nn.Module,
+        forward_input: List[torch.Tensor],
+        _forward_output: torch.Tensor,
+    ):
+        """Hook to capture activations and check for parameter tying in ghost clipping."""
+        if (
+            not requires_grad(module)
+            or not module.training
+            or not torch.is_grad_enabled()
+        ):
+            return
+
+        if not self.hooks_enabled:
+            return
+
+        if not hasattr(module, "activations"):
+            module.activations = []
+        module.activations.append([t.detach() for t in forward_input])
+
+        for _, p in trainable_parameters(module):
+            p._forward_counter += 1
+            if (
+                self.use_ghost_clipping
+                and p._forward_counter > 1
+                and type(module) in self.NORM_SAMPLERS
+            ):
+                raise NotImplementedError(
+                    "Parameter tying is not supported with Ghost Clipping"
+                )
 
     def capture_backprops_hook(
         self,
@@ -336,10 +385,7 @@ class GradSampleFastGradientClippingMixin(GradSampleHooksMixin):
         - Fast Gradient Clipping: Full gradient computation followed by norm computation
         """
         # Import here to avoid circular dependency
-        from opacus.grad_sample.grad_sample_module import (
-            create_or_accumulate_grad_sample,
-            promote_current_grad_sample,
-        )
+        from opacus.grad_sample.grad_sample_module import promote_current_grad_sample
 
         if not self.hooks_enabled:
             return
@@ -359,46 +405,94 @@ class GradSampleFastGradientClippingMixin(GradSampleHooksMixin):
         ]
 
         if self.use_ghost_clipping and type(module) in self.NORM_SAMPLERS:
-            # Ghost clipping: compute norms directly
-            norm_sampler_fn = self.NORM_SAMPLERS[type(module)]
-            norm_samples = norm_sampler_fn(module, activations, backprops)
-
-            for param, ns in norm_samples.items():
-                if param.requires_grad:
-                    param._norm_sample = ns
-                    param._forward_counter -= 1
-
+            self._compute_ghost_grad_sample_norms(module, activations, backprops)
         else:
-            # Fast gradient clipping: materialize gradients then compute norms
-            if not self.force_functorch and type(module) in self.GRAD_SAMPLERS:
-                grad_sampler_fn = self.GRAD_SAMPLERS[type(module)]
-            else:
-                grad_sampler_fn = ft_compute_per_sample_gradient
-
-            grad_samples = grad_sampler_fn(module, activations, backprops)
-            for param, gs in grad_samples.items():
-                create_or_accumulate_grad_sample(
-                    param=param, grad_sample=gs, max_batch_len=module.max_batch_len
-                )
-                # Also create norm sample for fast gradient clipping
-                create_norm_sample(
-                    param=param, grad_sample=gs, max_batch_len=module.max_batch_len
-                )
-
-            # Detect end of current batch processing
-            for _, p in trainable_parameters(module):
-                p._forward_counter -= 1
-                if p._forward_counter == 0:
-                    promote_current_grad_sample(p)
-
-                if not self.grad_accumulation_allowed:
-                    if isinstance(p.grad_sample, list) and len(p.grad_sample) > 1:
-                        raise ValueError(
-                            "Poisson sampling is not compatible with grad accumulation. "
-                            "You need to call optimizer.step() after every forward/backward pass "
-                            "or consider using BatchMemoryManager"
-                        )
+            self._compute_fast_grad_sample_norms(
+                module, activations, backprops, promote_current_grad_sample
+            )
 
         if len(module.activations) == 0:
             if hasattr(module, "max_batch_len"):
                 del module.max_batch_len
+
+    def _compute_ghost_grad_sample_norms(self, module, activations, backprops):
+        # Ghost clipping: compute norms directly
+        norm_sampler_fn = self.NORM_SAMPLERS[type(module)]
+        norm_samples = norm_sampler_fn(module, activations, backprops)
+
+        for param, ns in norm_samples.items():
+            if param.requires_grad:
+                param._norm_sample = ns
+                param._forward_counter -= 1
+
+    def _compute_fast_grad_sample_norms(
+        self, module, activations, backprops, promote_current_grad_sample
+    ):
+        # Fast gradient clipping: materialize gradients then compute norms
+        if not self.force_functorch and type(module) in self.GRAD_SAMPLERS:
+            grad_sampler_fn = self.GRAD_SAMPLERS[type(module)]
+        else:
+            grad_sampler_fn = ft_compute_per_sample_gradient
+
+        grad_samples = grad_sampler_fn(module, activations, backprops)
+        # Import here to avoid circular dependency
+        from opacus.grad_sample.grad_sample_module import (
+            create_or_accumulate_grad_sample,
+        )
+
+        for param, gs in grad_samples.items():
+            create_or_accumulate_grad_sample(
+                param=param, grad_sample=gs, max_batch_len=module.max_batch_len
+            )
+            # Also create norm sample for fast gradient clipping
+            create_norm_sample(
+                param=param, grad_sample=gs, max_batch_len=module.max_batch_len
+            )
+
+        # Detect end of current batch processing
+        for _, p in trainable_parameters(module):
+            p._forward_counter -= 1
+            if p._forward_counter == 0:
+                promote_current_grad_sample(p)
+
+            if not self.grad_accumulation_allowed:
+                if isinstance(p.grad_sample, list) and len(p.grad_sample) > 1:
+                    raise ValueError(
+                        "Poisson sampling is not compatible with grad accumulation. "
+                        "You need to call optimizer.step() after every forward/backward pass "
+                        "or consider using BatchMemoryManager"
+                    )
+
+    def log_module_gradient_sample_mode(
+        self, module: nn.Module, *, force_functorch=False, use_ghost_clipping=True
+    ):
+        """
+        Check if the module is compatible with the requested gradient sample mode.
+        """
+        # Do not add hooks to DPRNN, DPLSTM or DPGRU
+        if type(module) in [DPRNN, DPLSTM, DPGRU]:
+            return
+
+        module_type = type(module)
+        if use_ghost_clipping and module_type in self.NORM_SAMPLERS:
+            # Ghost clipping: module has a registered norm sampler
+            pass
+        elif not force_functorch and module_type in self.GRAD_SAMPLERS:
+            # Fast gradient clipping: module has a registered grad sampler
+            pass
+        elif force_functorch or (
+            has_trainable_params(module) and module_type not in self.GRAD_SAMPLERS
+        ):
+            # Functorch will be used
+            pass
+
+    @property
+    def per_sample_gradient_norms(self) -> torch.Tensor:
+        """Get per-example gradient norms."""
+        if not hasattr(self, "_per_sample_gradient_norms"):
+            self._per_sample_gradient_norms = self.get_norm_sample()
+        return self._per_sample_gradient_norms
+
+    @per_sample_gradient_norms.setter
+    def per_sample_gradient_norms(self, value: torch.Tensor):
+        self._per_sample_gradient_norms = value

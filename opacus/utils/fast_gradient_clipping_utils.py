@@ -78,15 +78,16 @@ class DPTensorFastGradientClipping:
 
     def __rmul__(self, other):
         """
-        Right multiplication operation for DPTensorFastGradientClipping.
-        Enables: scalar * loss
+        Left multiplication by a scalar.
+        Required to support loss weighting: weight * loss
         """
         return self.__mul__(other)
 
     def __add__(self, other):
         """
         Addition operation for DPTensorFastGradientClipping.
-        Enables: loss + scalar or loss + loss
+        Enables: loss + scalar or loss + loss.
+        Required to support combining multiple losses in a single training step.
         """
         if isinstance(other, DPTensorFastGradientClipping):
             if self.loss_reduction != other.loss_reduction:

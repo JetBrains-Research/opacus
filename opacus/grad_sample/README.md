@@ -13,14 +13,14 @@ Each implementation comes with its own set of limitations and benefits.
 
 **TL;DR:**
 - Use `GradSampleModule` (`grad_sample_mode="hooks"`) for stable implementation with standard models (default)
-- Use controller mode (`return_controller=True`) for transformer models and when you need direct model access without wrapping
+- Use controller mode (`wrap_model=False`) for transformer models and when you need direct model access without wrapping
 - Use `GradSampleModuleExpandedWeights` (`grad_sample_mode="ew"`) if you want to experiment with better performance
 - Use `grad_sample_mode="functorch"` if your model has unsupported layers
 
 Please report any strange errors or unexpected behaviour to us!
 
 ## Controller-Based Approach (No Model Wrapping)
-- Usage: Set `return_controller=True` in `PrivacyEngine.make_private()`
+- Usage: Set `wrap_model=False` in `PrivacyEngine.make_private()`
 - Controller class: ``opacus.grad_sample.GradSampleController``
 
 **Recommended for transformer models and when model wrapping causes issues.**
@@ -45,7 +45,7 @@ model, optimizer, dataloader = privacy_engine.make_private(
     data_loader=dataloader,
     noise_multiplier=1.0,
     max_grad_norm=1.0,
-    return_controller=True,  # ← Enable controller mode
+    wrap_model=False,  # ← Enable controller mode
 )
 # model is now unwrapped with hooks attached directly
 ```

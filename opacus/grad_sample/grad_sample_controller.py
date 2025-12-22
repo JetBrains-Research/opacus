@@ -21,26 +21,11 @@ directly to model parameters for computing per-sample gradients.
 """
 
 import logging
-from functools import partial
-from typing import Iterable, List, Tuple
+from typing import List
 
-import torch
 import torch.nn as nn
-from opacus.grad_sample.functorch import ft_compute_per_sample_gradient, prepare_layer
-from opacus.grad_sample.grad_sample_hooks_mixin import GradSampleHooksMixin
-from opacus.grad_sample.grad_sample_module import (
-    _get_batch_size,
-    create_or_accumulate_grad_sample,
-    promote_current_grad_sample,
-)
-from opacus.layers.dp_rnn import DPGRU, DPLSTM, DPRNN, RNNLinear
-from opacus.utils.module_utils import (
-    has_trainable_params,
-    requires_grad,
-    trainable_modules,
-    trainable_parameters,
-)
-from opacus.validators.errors import UnsupportedModuleError
+from opacus.grad_sample.grad_sample_hooks_mixin import HooksHandler
+from opacus.utils.module_utils import trainable_modules, trainable_parameters
 from torch.utils.hooks import RemovableHandle
 
 
@@ -56,10 +41,10 @@ OPACUS_PARAM_MONKEYPATCH_ATTRS = [
 ]
 
 
-# GradSampleHooksMixin is now imported from grad_sample_hooks_mixin.py to avoid circular imports
+# HooksHandler is now imported from grad_sample_hooks_mixin.py to avoid circular imports
 
 
-class GradSampleController(GradSampleHooksMixin):
+class GradSampleController(HooksHandler):
     """
     Controller for managing privacy hooks on models without wrapping them
 

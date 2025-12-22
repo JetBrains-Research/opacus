@@ -107,6 +107,7 @@ def get_gsm_class(grad_sample_mode: str) -> Type[AbstractGradSampleModule]:
             - "ew": Expanded weights approach (GradSampleModuleExpandedWeights)
             - "ghost": Ghost clipping with wrapping (GradSampleModuleFastGradientClipping)
             - "ghost_fsdp": Ghost clipping with FSDP (GradSampleModuleFastGradientClippingFSDP)
+            - "ghost_tp": Ghost clipping with TP (GradSampleModuleFastGradientClippingTP)
             - "no_op": No-op implementation (GradSampleModuleNoOp)
 
     Returns:
@@ -123,12 +124,18 @@ def get_gsm_class(grad_sample_mode: str) -> Type[AbstractGradSampleModule]:
         return GradSampleModuleFastGradientClipping
     elif grad_sample_mode == "ghost_fsdp":
         return GradSampleModuleFastGradientClippingFSDP
+    elif grad_sample_mode == "ghost_tp":
+        from opacus.grad_sample.grad_sample_module_fast_gradient_clipping_tp import (
+            GradSampleModuleFastGradientClippingTP,
+        )
+
+        return GradSampleModuleFastGradientClippingTP
     elif grad_sample_mode == "no_op":
         return GradSampleModuleNoOp
     else:
         raise ValueError(
             f"Unexpected grad_sample_mode: {grad_sample_mode}. "
-            f"Allowed values: hooks, functorch, ew, ghost, ghost_fsdp, no_op"
+            f"Allowed values: hooks, functorch, ew, ghost, ghost_fsdp, ghost_tp, no_op"
         )
 
 

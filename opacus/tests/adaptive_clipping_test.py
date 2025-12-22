@@ -53,14 +53,14 @@ class BaseAdaClipTest:
 
         # Use controller mode if specified
         if self.USE_CONTROLLER:
-            # Controller-based mode with return_controller=True
-            # When return_controller=True, make_private returns (model, optimizer, dataloader)
+            # Controller-based mode with wrap_model=False
+            # When wrap_model=False, make_private returns (model, optimizer, dataloader)
             # and stores the controller on model._opacus_controller
             model, optimizer, dataloader = privacy_engine.make_private(
                 module=model,
                 optimizer=optimizer,
                 data_loader=self.dataloader,
-                return_controller=True,
+                wrap_model=False,
                 **kwargs,
             )
             # Extract controller from model

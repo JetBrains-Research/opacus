@@ -22,12 +22,8 @@ from opacus.accountants import create_accountant
 from opacus.accountants.utils import get_noise_multiplier
 from opacus.data_loader import DPDataLoader, switch_generator
 from opacus.distributed import DifferentiallyPrivateDistributedDataParallel as DPDDP
-from opacus.grad_sample import (
-    AbstractGradSampleModule,
-    GradSampleModule,
-    get_gsm_class,
-    wrap_model,
-)
+from opacus.grad_sample import AbstractGradSampleModule, GradSampleModule, get_gsm_class
+from opacus.grad_sample import wrap_model as wrap_model_fn
 from opacus.grad_sample.grad_sample_controller import GradSampleController
 from opacus.optimizers import DPOptimizer, get_optimizer_class
 from opacus.schedulers import _GradClipScheduler, _NoiseScheduler
@@ -181,7 +177,7 @@ class PrivacyEngine:
         loss_reduction: str = "mean",
         grad_sample_mode: str = "hooks",
         strict: bool = False,
-        return_controller: bool = False,
+        wrap_model: bool = True,
         use_ghost_clipping: bool = True,
     ) -> Union[AbstractGradSampleModule, GradSampleController]:
         """
@@ -194,17 +190,17 @@ class PrivacyEngine:
             loss_reduction: Loss reduction method ("mean" or "sum")
             grad_sample_mode: Mode for computing per-sample gradients
             strict: If True, validates module strictly
-            return_controller: If True, uses controller-based approach (no wrapping).
-                If False, wraps module in GradSampleModule.
+            wrap_model: If True, wraps module in GradSampleModule.
+                If False, uses controller-based approach (no wrapping).
             use_ghost_clipping: If True and grad_sample_mode="ghost", uses ghost clipping
 
         Returns:
-            Either GradSampleModule instance (if return_controller=False) or
-            GradSampleController instance (if return_controller=True)
+            Either GradSampleModule instance (if wrap_model=True) or
+            GradSampleController instance (if wrap_model=False)
         """
         # Validate module unless using controller-based approach
         # (controller validates internally)
-        if not return_controller:
+        if wrap_model:
             # Ideally, validation should have been taken care of by calling
             # `get_compatible_module()`
             self.validate(module=module, optimizer=None, data_loader=None)
@@ -238,15 +234,15 @@ class PrivacyEngine:
                     "max_grad_norm must be provided when using ghost clipping mode"
                 )
             kwargs["max_grad_norm"] = max_grad_norm
-            if return_controller:
+            if not wrap_model:
                 # Only controllers have use_ghost_clipping parameter
                 kwargs["use_ghost_clipping"] = use_ghost_clipping
 
         # Use unified wrap_model function
-        return wrap_model(
+        return wrap_model_fn(
             module,
             grad_sample_mode=grad_sample_mode,
-            use_controller=return_controller,
+            use_controller=not wrap_model,
             **kwargs,
         )
 
@@ -349,7 +345,7 @@ class PrivacyEngine:
         noise_generator=None,
         grad_sample_mode: str = "hooks",
         strict: bool = True,
-        return_controller: bool = False,
+        wrap_model: bool = True,
         **kwargs,
     ) -> Union[
         Tuple[GradSampleModule, DPOptimizer, DataLoader],
@@ -364,7 +360,7 @@ class PrivacyEngine:
         All of the returned objects act just like their non-private counterparts
         passed as arguments, but with added DP tasks.
 
-        - Model is wrapped to also compute per sample gradients (or hooks attached directly if return_controller=True).
+        - Model is wrapped to also compute per sample gradients (if wrap_model=True).
         - Optimizer is now responsible for gradient clipping and adding noise to the gradients.
         - Criterion is a wrapper around the original criterion that packages the two backward passes for fast gradient clipping.
         - DataLoader is updated to perform Poisson sampling.
@@ -406,19 +402,19 @@ class PrivacyEngine:
                 :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
                 details
             strict: If True, will raise an error if the module is incompatible with
-                grad_sample_mode and will not attach hooks (only used when return_controller=True).
-            return_controller: If True, uses controller-based approach (no wrapping).
-                Returns the original unwrapped module with hooks attached via controller.
+                grad_sample_mode and will not attach hooks (only used when wrap_model=False).
+            wrap_model: If True (default), wraps module in GradSampleModule.
+                If False, uses controller-based approach (no wrapping).
+                Returns the original unwrapped module with hooks attached directly.
                 Controller is stored at module._opacus_controller for cleanup if needed.
-                If False (default), wraps module in GradSampleModule.
                 Recommended for HuggingFace transformers and models with custom __getattr__.
 
         Returns:
-            If return_controller=False (default):
+            If wrap_model=True (default):
                 Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
                 Model is a GradSampleModule wrapper around the original model.
 
-            If return_controller=True:
+            If wrap_model=False:
                 Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
                 Model is the UNWRAPPED original model with hooks attached directly.
 
@@ -452,7 +448,7 @@ class PrivacyEngine:
             loss_reduction=loss_reduction,
             grad_sample_mode=grad_sample_mode,
             strict=strict,
-            return_controller=return_controller,
+            wrap_model=wrap_model,
         )
         if poisson_sampling:
             controller_or_module.forbid_grad_accumulation()
@@ -497,14 +493,14 @@ class PrivacyEngine:
                 **kwargs,
             )
 
-            if return_controller:
+            if not wrap_model:
                 # Store controller reference on module for cleanup
                 module._opacus_controller = controller_or_module
                 return module, optimizer, criterion, data_loader
             else:
                 return controller_or_module, optimizer, criterion, data_loader
 
-        if return_controller:
+        if not wrap_model:
             # Store controller reference on module for cleanup
             module._opacus_controller = controller_or_module
             return module, optimizer, data_loader
@@ -529,7 +525,7 @@ class PrivacyEngine:
         noise_generator=None,
         grad_sample_mode: str = "hooks",
         strict: bool = True,
-        return_controller: bool = False,
+        wrap_model: bool = True,
         **kwargs,
     ) -> Union[
         Tuple[GradSampleModule, DPOptimizer, DataLoader],
@@ -578,11 +574,20 @@ class PrivacyEngine:
                 implementation class for the wrapped ``module``. See
                 :class:`~opacus.grad_sample.gsm_base.AbstractGradSampleModule` for more
                 details
+            strict: If True, will raise an error if the module is incompatible with
+                grad_sample_mode and will not attach hooks (only used when wrap_model=False).
+            wrap_model: If True (default), wraps module in GradSampleModule.
+                If False, uses controller-based approach (no wrapping).
+                Returns the original unwrapped module with hooks attached directly.
+                Controller is stored at module._opacus_controller for cleanup if needed.
+                Recommended for HuggingFace transformers and models with custom __getattr__.
 
         Returns:
-            Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
+            If wrap_model=True (default):
+                Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
+                Model is a GradSampleModule wrapper around the original model.
 
-            If return_controller=True:
+            If wrap_model=False:
                 Tuple of (model, optimizer, data_loader) or (model, optimizer, criterion, data_loader).
                 Model is the UNWRAPPED original model with hooks attached directly.
 
@@ -624,7 +629,7 @@ class PrivacyEngine:
             poisson_sampling=poisson_sampling,
             clipping=clipping,
             strict=strict,
-            return_controller=return_controller,
+            wrap_model=wrap_model,
             **kwargs,
         )
 

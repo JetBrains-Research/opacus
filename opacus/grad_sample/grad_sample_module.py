@@ -16,22 +16,12 @@
 from __future__ import annotations
 
 import logging
-import warnings
-from functools import partial
-from typing import Iterable, List, Tuple
 
 import torch
 import torch.nn as nn
-from opacus.grad_sample.functorch import ft_compute_per_sample_gradient, prepare_layer
-from opacus.grad_sample.grad_sample_hooks_mixin import GradSampleHooksMixin
+from opacus.grad_sample.grad_sample_hooks_mixin import HooksHandler
 from opacus.grad_sample.gsm_base import AbstractGradSampleModule
-from opacus.layers.dp_rnn import DPGRU, DPLSTM, DPRNN, RNNLinear
-from opacus.utils.module_utils import (
-    has_trainable_params,
-    requires_grad,
-    trainable_modules,
-    trainable_parameters,
-)
+from opacus.utils.module_utils import trainable_modules
 
 
 logger = logging.getLogger(__name__)
@@ -77,7 +67,7 @@ def promote_current_grad_sample(p: nn.Parameter) -> None:
         del p._current_grad_sample
 
 
-class GradSampleModule(AbstractGradSampleModule, GradSampleHooksMixin):
+class GradSampleModule(AbstractGradSampleModule, HooksHandler):
     """
     Hooks-based implementation of AbstractGradSampleModule
 
@@ -240,13 +230,13 @@ class GradSampleModule(AbstractGradSampleModule, GradSampleHooksMixin):
     # Override base class no-op methods to use mixin implementations
     def forbid_grad_accumulation(self):
         """Forbid gradient accumulation (for Poisson sampling)."""
-        GradSampleHooksMixin.forbid_grad_accumulation(self)
+        HooksHandler.forbid_grad_accumulation(self)
 
     def allow_grad_accumulation(self):
         """Allow gradient accumulation."""
-        GradSampleHooksMixin.allow_grad_accumulation(self)
+        HooksHandler.allow_grad_accumulation(self)
 
-    # Note: The following methods are inherited from GradSampleHooksMixin:
+    # Note: The following methods are inherited from HooksHandler:
     # - capture_activations_hook
     # - capture_backprops_hook
     # - rearrange_grad_samples
