@@ -24,7 +24,7 @@ from opacus.data_loader import DPDataLoader, switch_generator
 from opacus.distributed import DifferentiallyPrivateDistributedDataParallel as DPDDP
 from opacus.grad_sample import AbstractGradSampleModule, GradSampleModule, get_gsm_class
 from opacus.grad_sample import wrap_model as wrap_model_fn
-from opacus.grad_sample.grad_sample_controller import GradSampleController
+from opacus.grad_sample.grad_sample_module import GradSampleHooks
 from opacus.optimizers import DPOptimizer, get_optimizer_class
 from opacus.schedulers import _GradClipScheduler, _NoiseScheduler
 from opacus.utils.fast_gradient_clipping_utils import DPLossFastGradientClipping
@@ -179,7 +179,7 @@ class PrivacyEngine:
         strict: bool = False,
         wrap_model: bool = True,
         use_ghost_clipping: bool = True,
-    ) -> Union[AbstractGradSampleModule, GradSampleController]:
+    ) -> Union[AbstractGradSampleModule, GradSampleHooks]:
         """
         Prepares a model for differentially private training.
 
@@ -191,15 +191,15 @@ class PrivacyEngine:
             grad_sample_mode: Mode for computing per-sample gradients
             strict: If True, validates module strictly
             wrap_model: If True, wraps module in GradSampleModule.
-                If False, uses controller-based approach (no wrapping).
+                If False, uses hooks-based approach (no wrapping).
             use_ghost_clipping: If True and grad_sample_mode="ghost", uses ghost clipping
 
         Returns:
             Either GradSampleModule instance (if wrap_model=True) or
-            GradSampleController instance (if wrap_model=False)
+            GradSampleHooks instance (if wrap_model=False)
         """
-        # Validate module unless using controller-based approach
-        # (controller validates internally)
+        # Validate module unless using hooks-based approach
+        # (hooks validate internally)
         if wrap_model:
             # Ideally, validation should have been taken care of by calling
             # `get_compatible_module()`
@@ -220,7 +220,7 @@ class PrivacyEngine:
                     )
                 return module
 
-        # Prepare kwargs for wrapping/controller
+        # Prepare kwargs for wrapping/hooks
         kwargs = {
             "batch_first": batch_first,
             "loss_reduction": loss_reduction,
@@ -235,21 +235,21 @@ class PrivacyEngine:
                 )
             kwargs["max_grad_norm"] = max_grad_norm
             if not wrap_model:
-                # Only controllers have use_ghost_clipping parameter
+                # Only hooks have use_ghost_clipping parameter
                 kwargs["use_ghost_clipping"] = use_ghost_clipping
 
         # Use unified wrap_model function
         return wrap_model_fn(
             module,
             grad_sample_mode=grad_sample_mode,
-            use_controller=not wrap_model,
+            wrap_model=wrap_model,
             **kwargs,
         )
 
     def _prepare_criterion(
         self,
         *,
-        controller_or_module: Union[GradSampleModule, GradSampleController],
+        hooks_or_module: Union[GradSampleModule, GradSampleHooks],
         optimizer: DPOptimizer,
         criterion=nn.CrossEntropyLoss(),
         loss_reduction: str = "mean",
@@ -257,7 +257,7 @@ class PrivacyEngine:
     ) -> DPLossFastGradientClipping:
         """
         Args:
-            controller_or_module: GradSampleModule or GradSampleController used for training,
+            hooks_or_module: GradSampleModule or GradSampleHooks used for training,
             optimizer: DPOptimizer used for training,
             criterion: Loss function used for training,
             loss_reduction: "mean" or "sum", indicates if the loss reduction (for aggregating the gradients)
@@ -265,7 +265,7 @@ class PrivacyEngine:
         Prepare the DP loss class, which packages the two backward passes for fast gradient clipping.
         """
         return DPLossFastGradientClipping(
-            controller_or_module, optimizer, criterion, loss_reduction
+            hooks_or_module, optimizer, criterion, loss_reduction
         )
 
     def is_compatible(
@@ -404,9 +404,9 @@ class PrivacyEngine:
             strict: If True, will raise an error if the module is incompatible with
                 grad_sample_mode and will not attach hooks (only used when wrap_model=False).
             wrap_model: If True (default), wraps module in GradSampleModule.
-                If False, uses controller-based approach (no wrapping).
+                If False, uses hooks-based approach (no wrapping).
                 Returns the original unwrapped module with hooks attached directly.
-                Controller is stored at module._opacus_controller for cleanup if needed.
+                Hooks are stored at module._opacus_hooks for cleanup if needed.
                 Recommended for HuggingFace transformers and models with custom __getattr__.
 
         Returns:
@@ -441,7 +441,7 @@ class PrivacyEngine:
 
         distributed = isinstance(module, (DPDDP, DDP, FSDPModule))
 
-        controller_or_module = self._prepare_model(
+        hooks_or_module = self._prepare_model(
             module,
             batch_first=batch_first,
             max_grad_norm=max_grad_norm,
@@ -451,7 +451,7 @@ class PrivacyEngine:
             wrap_model=wrap_model,
         )
         if poisson_sampling:
-            controller_or_module.forbid_grad_accumulation()
+            hooks_or_module.forbid_grad_accumulation()
 
         data_loader = self._prepare_data_loader(
             data_loader,
@@ -486,7 +486,7 @@ class PrivacyEngine:
 
         if "ghost" in grad_sample_mode:
             criterion = self._prepare_criterion(
-                controller_or_module=controller_or_module,
+                hooks_or_module=hooks_or_module,
                 optimizer=optimizer,
                 criterion=criterion,
                 loss_reduction=loss_reduction,
@@ -494,18 +494,18 @@ class PrivacyEngine:
             )
 
             if not wrap_model:
-                # Store controller reference on module for cleanup
-                module._opacus_controller = controller_or_module
+                # Store hooks reference on module for cleanup
+                module._opacus_hooks = hooks_or_module
                 return module, optimizer, criterion, data_loader
             else:
-                return controller_or_module, optimizer, criterion, data_loader
+                return hooks_or_module, optimizer, criterion, data_loader
 
         if not wrap_model:
-            # Store controller reference on module for cleanup
-            module._opacus_controller = controller_or_module
+            # Store hooks reference on module for cleanup
+            module._opacus_hooks = hooks_or_module
             return module, optimizer, data_loader
         else:
-            return controller_or_module, optimizer, data_loader
+            return hooks_or_module, optimizer, data_loader
 
     def make_private_with_epsilon(
         self,
@@ -577,9 +577,9 @@ class PrivacyEngine:
             strict: If True, will raise an error if the module is incompatible with
                 grad_sample_mode and will not attach hooks (only used when wrap_model=False).
             wrap_model: If True (default), wraps module in GradSampleModule.
-                If False, uses controller-based approach (no wrapping).
+                If False, uses hooks-based approach (no wrapping).
                 Returns the original unwrapped module with hooks attached directly.
-                Controller is stored at module._opacus_controller for cleanup if needed.
+                Hooks are stored at module._opacus_hooks for cleanup if needed.
                 Recommended for HuggingFace transformers and models with custom __getattr__.
 
         Returns:

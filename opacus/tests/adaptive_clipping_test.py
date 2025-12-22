@@ -23,7 +23,7 @@ class BaseAdaClipTest:
 
     # Subclasses should set this
     ENGINE_CLASS = None
-    USE_CONTROLLER = False  # Set to True in controller-based subclass
+    WRAP_MODEL = True
 
     def setUp(self):
         self.DATA_SIZE = 100
@@ -39,23 +39,23 @@ class BaseAdaClipTest:
         )
 
     def tearDown(self):
-        """Clean up controller if needed."""
-        if hasattr(self, "controller") and self.controller is not None:
-            self.controller.cleanup()
+        """Clean up hooks if needed."""
+        if hasattr(self, "hooks") and self.hooks is not None:
+            self.hooks.cleanup()
 
     def _make_private(self, model, optimizer, **kwargs):
         """
         Wrapper to handle both PrivacyEngine modes.
 
-        Returns: (model, optimizer, dataloader, controller_or_none)
+        Returns: (model, optimizer, dataloader, hooks_or_none)
         """
         privacy_engine = self.ENGINE_CLASS()
 
-        # Use controller mode if specified
-        if self.USE_CONTROLLER:
-            # Controller-based mode with wrap_model=False
+        # Use hooks mode if wrap_model is False
+        if not self.WRAP_MODEL:
+            # Hooks-based mode with wrap_model=False
             # When wrap_model=False, make_private returns (model, optimizer, dataloader)
-            # and stores the controller on model._opacus_controller
+            # and stores the hooks on model._opacus_hooks
             model, optimizer, dataloader = privacy_engine.make_private(
                 module=model,
                 optimizer=optimizer,
@@ -63,13 +63,17 @@ class BaseAdaClipTest:
                 wrap_model=False,
                 **kwargs,
             )
-            # Extract controller from model
-            controller = model._opacus_controller
-            return model, optimizer, dataloader, controller
+            # Extract hooks from model
+            hooks = model._opacus_hooks
+            return model, optimizer, dataloader, hooks
         else:
             # Standard wrapped mode
             model, optimizer, dataloader = privacy_engine.make_private(
-                module=model, optimizer=optimizer, data_loader=self.dataloader, **kwargs
+                module=model,
+                optimizer=optimizer,
+                data_loader=self.dataloader,
+                wrap_model=True,
+                **kwargs,
             )
             return model, optimizer, dataloader, None
 
@@ -293,7 +297,7 @@ class BaseAdaClipTest:
         model1 = SimpleNet()
         optimizer1 = torch.optim.SGD(model1.parameters(), lr=self.LR)
 
-        model1, optimizer1, dataloader1, controller1 = self._make_private(
+        model1, optimizer1, dataloader1, hooks1 = self._make_private(
             model=model1,
             optimizer=optimizer1,
             noise_multiplier=0.0,
@@ -318,7 +322,7 @@ class BaseAdaClipTest:
         model2.load_state_dict(state_dict1)
         optimizer2 = torch.optim.SGD(model2.parameters(), lr=self.LR)
 
-        model2, optimizer2, dataloader2, controller2 = self._make_private(
+        model2, optimizer2, dataloader2, hooks2 = self._make_private(
             model=model2,
             optimizer=optimizer2,
             noise_multiplier=0.0,
@@ -360,13 +364,13 @@ class BaseAdaClipTest:
             params_differ, "AdaClip and fixed clipping should produce different results"
         )
 
-        # Cleanup both controllers if they exist
-        if controller1:
-            controller1.cleanup()
-        if controller2:
-            controller2.cleanup()
+        # Cleanup both hooks if they exist
+        if hooks1:
+            hooks1.cleanup()
+        if hooks2:
+            hooks2.cleanup()
         # Mark as cleaned up so tearDown doesn't try again
-        self.controller = None
+        self.hooks = None
 
     def test_adaclip_parameter_validation(self):
         """Test that AdaClip validates parameters correctly."""
@@ -394,7 +398,7 @@ class BaseAdaClipTest:
         optimizer = torch.optim.SGD(model.parameters(), lr=self.LR)
 
         unclipped_num_std = 0.5
-        model, optimizer, dataloader, self.controller = self._make_private(
+        model, optimizer, dataloader, self.hooks = self._make_private(
             model=model,
             optimizer=optimizer,
             noise_multiplier=0.8,  # With noise, < 2 * unclipped_num_std
@@ -429,11 +433,11 @@ class AdaClipStandardEngineTest(BaseAdaClipTest, unittest.TestCase):
     ENGINE_CLASS = PrivacyEngine
 
 
-class AdaClipGradSampleControllerEngineTest(BaseAdaClipTest, unittest.TestCase):
-    """Test AdaClipDPOptimizer with GradSampleController-based PrivacyEngine."""
+class AdaClipGradSampleHooksEngineTest(BaseAdaClipTest, unittest.TestCase):
+    """Test AdaClipDPOptimizer with GradSampleHooks-based PrivacyEngine."""
 
     ENGINE_CLASS = PrivacyEngine
-    USE_CONTROLLER = True  # Use controller mode
+    WRAP_MODEL = False  # Use hooks mode
 
 
 if __name__ == "__main__":

@@ -19,7 +19,9 @@ import logging
 import warnings
 
 import torch
+import torch.nn as nn
 from opacus.grad_sample.grad_sample_module_fast_gradient_clipping import (
+    FastGradientHooks,
     GradSampleModuleFastGradientClipping,
 )
 
@@ -28,16 +30,14 @@ logger = logging.getLogger(__name__)
 logger.disabled = False
 
 
-class GradSampleModuleFastGradientClippingTP(GradSampleModuleFastGradientClipping):
+class TPHooks(FastGradientHooks):
     """
-    Hooks-based implementation of GradSampleModule with Fast Gradient and Ghost Clipping
-
-    Computes norms of gradients without gradient instantiation
+    Hooks for Fast Gradient and Ghost Clipping with Tensor Parallelism support.
     """
 
     def __init__(
         self,
-        m: torch.nn.Module,
+        m: nn.Module,
         *,
         batch_first=True,
         loss_reduction="mean",
@@ -45,15 +45,17 @@ class GradSampleModuleFastGradientClippingTP(GradSampleModuleFastGradientClippin
         force_functorch=False,
         max_grad_norm=1,
         use_ghost_clipping=True,
+        **kwargs,
     ):
         super().__init__(
-            m,
+            m=m,
             batch_first=batch_first,
             loss_reduction=loss_reduction,
             strict=strict,
             force_functorch=force_functorch,
             max_grad_norm=max_grad_norm,
             use_ghost_clipping=use_ghost_clipping,
+            **kwargs,
         )
         self.set_pattern_param_sample_norm_sum()
         warnings.warn(
@@ -62,12 +64,7 @@ class GradSampleModuleFastGradientClippingTP(GradSampleModuleFastGradientClippin
 
     def set_pattern_param_sample_norm_sum(self):
         """
-        When initializing the gradient sample module, the following function investigates the tensor parallelism state of different model parameters, and then decide whether or not to merge the per-sample gradient norm from local devices.
-
-        Specifically, under the following exceptions, we should not merge the per-sample norm from local devices, but maintain the one from device 0:
-        1. The parameter is not a DTensor.
-        2. The model is ``nn.embedding`` while under ``RowWiseParallel``.
-        3. The model weight is not sharded. For example, ``nn.linear.bias`` under ``RowWiseParallel``. This situation is currently unsupported since ``fsdpoptimizer`` requires all the parameters to be sharded.
+        When initializing the hooks, the following function investigates the tensor parallelism state of different model parameters, and then decide whether or not to merge the per-sample gradient norm from local devices.
         """
         for module in self.iterate_submodules(self._module):
             for name, param in module.named_parameters():
@@ -111,3 +108,36 @@ class GradSampleModuleFastGradientClippingTP(GradSampleModuleFastGradientClippin
         )
         self.per_sample_gradient_norms = squared_norm_sample.sqrt()
         return squared_norm_sample.sqrt()
+
+
+class GradSampleModuleFastGradientClippingTP(
+    TPHooks, GradSampleModuleFastGradientClipping
+):
+    """
+    Hooks-based implementation of GradSampleModule with Fast Gradient and Ghost Clipping and TP support
+
+    Computes norms of gradients without gradient instantiation
+    """
+
+    def __init__(
+        self,
+        m: torch.nn.Module,
+        *,
+        batch_first=True,
+        loss_reduction="mean",
+        strict: bool = True,
+        force_functorch=False,
+        max_grad_norm=1,
+        use_ghost_clipping=True,
+        **kwargs,
+    ):
+        super().__init__(
+            m=m,
+            batch_first=batch_first,
+            loss_reduction=loss_reduction,
+            strict=strict,
+            force_functorch=force_functorch,
+            max_grad_norm=max_grad_norm,
+            use_ghost_clipping=use_ghost_clipping,
+            **kwargs,
+        )

@@ -18,19 +18,22 @@ from .dp_multihead_attention import compute_sequence_bias_grad_sample  # noqa
 from .dp_rnn import compute_rnn_linear_grad_sample  # noqa
 from .embedding import compute_embedding_grad_sample  # noqa
 from .embedding_norm_sample import compute_embedding_norm_sample  # noqa
-from .grad_sample_controller import GradSampleController  # noqa
-from .grad_sample_controller_fast_gradient_clipping import (  # noqa
-    GradSampleControllerFastGradientClipping,
+from .grad_sample_module import (
+    GradSampleHooks,
+    GradSampleModule,
+    create_or_accumulate_grad_sample,
 )
-from .grad_sample_module import GradSampleModule, create_or_accumulate_grad_sample
 from .grad_sample_module_fast_gradient_clipping import (  # noqa
+    FastGradientHooks,
     GradSampleModuleFastGradientClipping,
 )
 from .grad_sample_module_fast_gradient_clipping_fsdp import (  # noqa
+    FSDPHooks,
     GradSampleModuleFastGradientClippingFSDP,
 )
 from .grad_sample_module_fast_gradient_clipping_tp import (  # noqa
     GradSampleModuleFastGradientClippingTP,
+    TPHooks,
 )
 from .group_norm import compute_group_norm_grad_sample  # noqa
 from .gsm_base import AbstractGradSampleModule
@@ -49,8 +52,10 @@ from .utils import (
 
 
 __all__ = [
-    "GradSampleController",
-    "GradSampleControllerFastGradientClipping",
+    "GradSampleHooks",
+    "FastGradientHooks",
+    "FSDPHooks",
+    "TPHooks",
     "GradSampleModule",
     "GradSampleModuleFastGradientClipping",
     "GradSampleModuleFastGradientClippingFSDP",

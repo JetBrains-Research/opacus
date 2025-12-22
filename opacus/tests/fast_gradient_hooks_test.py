@@ -17,9 +17,7 @@ import unittest
 
 import torch
 import torch.nn as nn
-from opacus.grad_sample.grad_sample_controller_fast_gradient_clipping import (
-    GradSampleControllerFastGradientClipping,
-)
+from opacus.grad_sample import FastGradientHooks, GradSampleModule
 from opacus.grad_sample.grad_sample_module_fast_gradient_clipping import (
     GradSampleModuleFastGradientClipping,
 )
@@ -40,7 +38,7 @@ class SimpleModel(nn.Module):
         return x
 
 
-class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
+class FastGradientHooksTest(unittest.TestCase):
     def setUp(self):
         self.batch_size = 4
         self.input_dim = 10
@@ -49,12 +47,12 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         self.max_grad_norm = 1.0
         self.loss_reduction = "mean"
 
-    def test_controller_creation(self):
-        """Test that controller can be created without wrapping model"""
+    def test_hooks_creation(self):
+        """Test that hooks can be created without wrapping model"""
         model = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
         original_type = type(model)
 
-        controller = GradSampleControllerFastGradientClipping(
+        hooks = FastGradientHooks(
             model,
             batch_first=True,
             loss_reduction=self.loss_reduction,
@@ -66,18 +64,18 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         self.assertEqual(type(model), original_type)
         self.assertIsInstance(model, SimpleModel)
 
-        # Controller should have hooks
-        self.assertTrue(len(controller.autograd_grad_sample_hooks) > 0)
-        self.assertTrue(controller.hooks_enabled)
+        # Hooks should be installed
+        self.assertTrue(len(hooks.autograd_grad_sample_hooks) > 0)
+        self.assertTrue(hooks.hooks_enabled)
 
         # Clean up
-        controller.cleanup()
+        hooks.cleanup()
 
     def test_norm_sample_computation(self):
         """Test that norm samples are computed correctly"""
         model = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
 
-        controller = GradSampleControllerFastGradientClipping(
+        hooks = FastGradientHooks(
             model,
             batch_first=True,
             loss_reduction=self.loss_reduction,
@@ -98,19 +96,19 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         loss.backward()
 
         # Check that norm samples are computed
-        for param in controller.trainable_parameters:
+        for name, param in model.named_parameters():
             if param.requires_grad:
                 self.assertIsNotNone(param._norm_sample)
                 self.assertEqual(param._norm_sample.shape[0], self.batch_size)
 
         # Clean up
-        controller.cleanup()
+        hooks.cleanup()
 
     def test_clipping_coefficient(self):
         """Test that clipping coefficients are computed correctly"""
         model = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
 
-        controller = GradSampleControllerFastGradientClipping(
+        hooks = FastGradientHooks(
             model,
             batch_first=True,
             loss_reduction=self.loss_reduction,
@@ -131,7 +129,7 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         loss.backward()
 
         # Get clipping coefficient
-        coeff = controller.get_clipping_coef()
+        coeff = hooks.get_clipping_coef()
 
         # Coefficients should be between 0 and 1
         self.assertTrue(torch.all(coeff >= 0))
@@ -139,13 +137,13 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         self.assertEqual(coeff.shape[0], self.batch_size)
 
         # Clean up
-        controller.cleanup()
+        hooks.cleanup()
 
     def test_hooks_enable_disable(self):
         """Test that hooks can be enabled and disabled"""
         model = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
 
-        controller = GradSampleControllerFastGradientClipping(
+        hooks = FastGradientHooks(
             model,
             batch_first=True,
             loss_reduction=self.loss_reduction,
@@ -153,24 +151,24 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         )
 
         # Hooks should be enabled by default
-        self.assertTrue(controller.hooks_enabled)
+        self.assertTrue(hooks.hooks_enabled)
 
         # Disable hooks
-        controller.disable_hooks()
-        self.assertFalse(controller.hooks_enabled)
+        hooks.disable_hooks()
+        self.assertFalse(hooks.hooks_enabled)
 
         # Enable hooks
-        controller.enable_hooks()
-        self.assertTrue(controller.hooks_enabled)
+        hooks.enable_hooks()
+        self.assertTrue(hooks.hooks_enabled)
 
         # Clean up
-        controller.cleanup()
+        hooks.cleanup()
 
     def test_cleanup(self):
         """Test that cleanup removes all hooks and attributes"""
         model = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
 
-        controller = GradSampleControllerFastGradientClipping(
+        hooks = FastGradientHooks(
             model,
             batch_first=True,
             loss_reduction=self.loss_reduction,
@@ -178,15 +176,15 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         )
 
         # Verify hooks and attributes exist
-        self.assertTrue(len(controller.autograd_grad_sample_hooks) > 0)
+        self.assertTrue(len(hooks.autograd_grad_sample_hooks) > 0)
         for param in model.parameters():
             self.assertTrue(hasattr(param, "_forward_counter"))
 
         # Cleanup
-        controller.cleanup()
+        hooks.cleanup()
 
         # Verify hooks are removed
-        self.assertEqual(len(controller.autograd_grad_sample_hooks), 0)
+        self.assertFalse(hasattr(hooks, "autograd_grad_sample_hooks"))
 
         # Verify attributes are removed
         for param in model.parameters():
@@ -194,18 +192,18 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
             self.assertFalse(hasattr(param, "_forward_counter"))
             self.assertFalse(hasattr(param, "_norm_sample"))
 
-    def test_controller_vs_wrapped_equivalence(self):
-        """Test that controller produces same norms as wrapped module"""
+    def test_hooks_vs_wrapped_equivalence(self):
+        """Test that hooks produce same norms as wrapped module"""
         # Create two identical models
-        model_controller = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
+        model_hooks = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
         model_wrapped = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
 
         # Copy weights
-        model_wrapped.load_state_dict(model_controller.state_dict())
+        model_wrapped.load_state_dict(model_hooks.state_dict())
 
-        # Create controller and wrapped module
-        controller = GradSampleControllerFastGradientClipping(
-            model_controller,
+        # Create hooks and wrapped module
+        hooks = FastGradientHooks(
+            model_hooks,
             batch_first=True,
             loss_reduction=self.loss_reduction,
             max_grad_norm=self.max_grad_norm,
@@ -225,13 +223,13 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         x = torch.randn(self.batch_size, self.input_dim)
         target = torch.randint(0, self.output_dim, (self.batch_size,))
 
-        # Forward and backward pass for controller
-        model_controller.train()
-        output_controller = model_controller(x.clone())
-        loss_controller = nn.functional.cross_entropy(
-            output_controller, target, reduction=self.loss_reduction
+        # Forward and backward pass for hooks
+        model_hooks.train()
+        output_hooks = model_hooks(x.clone())
+        loss_hooks = nn.functional.cross_entropy(
+            output_hooks, target, reduction=self.loss_reduction
         )
-        loss_controller.backward()
+        loss_hooks.backward()
 
         # Forward and backward pass for wrapped
         wrapped.train()
@@ -242,39 +240,39 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         loss_wrapped.backward()
 
         # Get norms
-        norm_controller = controller.get_norm_sample()
+        norm_hooks = hooks.get_norm_sample()
         norm_wrapped = wrapped.get_norm_sample()
 
         # Norms should be very close
         self.assertTrue(
-            torch.allclose(norm_controller, norm_wrapped, rtol=1e-4, atol=1e-4)
+            torch.allclose(norm_hooks, norm_wrapped, rtol=1e-4, atol=1e-4)
         )
 
         # Clean up
-        controller.cleanup()
+        hooks.cleanup()
 
     def test_isinstance_preserved(self):
-        """Test that isinstance checks work after controller attachment"""
+        """Test that isinstance checks work after hooks attachment"""
         model = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
 
-        # Before controller
+        # Before hooks
         self.assertIsInstance(model, SimpleModel)
         self.assertIsInstance(model, nn.Module)
 
-        # Create controller
-        controller = GradSampleControllerFastGradientClipping(
+        # Create hooks
+        hooks = FastGradientHooks(
             model,
             batch_first=True,
             loss_reduction=self.loss_reduction,
             max_grad_norm=self.max_grad_norm,
         )
 
-        # After controller - isinstance should still work
+        # After hooks - isinstance should still work
         self.assertIsInstance(model, SimpleModel)
         self.assertIsInstance(model, nn.Module)
 
         # Clean up
-        controller.cleanup()
+        hooks.cleanup()
 
     def test_dp_tensor_arithmetic_operations(self):
         """Test that DPTensorFastGradientClipping supports arithmetic operations"""
@@ -286,7 +284,7 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         model = SimpleModel(self.input_dim, self.hidden_dim, self.output_dim)
         optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
 
-        controller = GradSampleControllerFastGradientClipping(
+        hooks = FastGradientHooks(
             model,
             batch_first=True,
             loss_reduction=self.loss_reduction,
@@ -303,7 +301,7 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
 
         loss_per_sample = torch.randn(self.batch_size)
         dp_loss = DPTensorFastGradientClipping(
-            controller, dp_optimizer, loss_per_sample, self.loss_reduction
+            hooks, dp_optimizer, loss_per_sample, self.loss_reduction
         )
 
         # Test division
@@ -337,7 +335,7 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         # Test addition with another DPTensor
         loss_per_sample2 = torch.randn(self.batch_size)
         dp_loss2 = DPTensorFastGradientClipping(
-            controller, dp_optimizer, loss_per_sample2, self.loss_reduction
+            hooks, dp_optimizer, loss_per_sample2, self.loss_reduction
         )
         summed_loss = dp_loss + dp_loss2
         self.assertIsInstance(summed_loss, DPTensorFastGradientClipping)
@@ -377,7 +375,7 @@ class GradSampleControllerFastGradientClippingTest(unittest.TestCase):
         self.assertIn("DPTensorFastGradientClipping", str_str)
 
         # Clean up
-        controller.cleanup()
+        hooks.cleanup()
 
 
 if __name__ == "__main__":

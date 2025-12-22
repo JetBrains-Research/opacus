@@ -15,7 +15,7 @@
 
 from . import utils
 from .grad_sample import (
-    GradSampleController,
+    GradSampleHooks,
     GradSampleModule,
     GradSampleModuleFastGradientClipping,
 )
@@ -25,7 +25,7 @@ from .version import __version__
 
 __all__ = [
     "PrivacyEngine",
-    "GradSampleController",
+    "GradSampleHooks",
     "GradSampleModule",
     "GradSampleModuleFastGradientClipping",
     "utils",

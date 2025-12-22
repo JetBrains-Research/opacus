@@ -43,6 +43,7 @@ class AbstractGradSampleModule(nn.Module, ABC):
         *,
         batch_first=True,
         loss_reduction="mean",
+        **kwargs,
     ):
         """
 
@@ -54,6 +55,7 @@ class AbstractGradSampleModule(nn.Module, ABC):
                 ``[K, batch_size, ...]``
             loss_reduction: Indicates if the loss reduction (for aggregating the gradients)
                 is a sum or a mean operation. Can take values "sum" or "mean"
+            **kwargs: Additional keyword arguments passed to the parent class
 
         Raises:
             NotImplementedError
