@@ -30,6 +30,7 @@ from .grad_sample_module_fast_gradient_clipping_tp import (
     GradSampleHooksFastGradientClippingTP,
     GradSampleModuleFastGradientClippingTP,
 )
+from .grad_sample_module_fsdp import GradSampleHooksFSDP, GradSampleModuleFSDP
 from .gsm_base import AbstractGradSampleModule
 from .gsm_exp_weights import GradSampleModuleExpandedWeights
 from .gsm_no_op import GradSampleHooksNoOp, GradSampleModuleNoOp
@@ -125,12 +126,14 @@ def get_gsm_class(grad_sample_mode: str) -> Type[AbstractGradSampleModule]:
         return GradSampleModuleFastGradientClippingFSDP
     elif grad_sample_mode == "ghost_tp":
         return GradSampleModuleFastGradientClippingTP
+    elif grad_sample_mode == "hooks_fsdp":
+        return GradSampleModuleFSDP
     elif grad_sample_mode == "no_op":
         return GradSampleModuleNoOp
     else:
         raise ValueError(
             f"Unexpected grad_sample_mode: {grad_sample_mode}. "
-            f"Allowed values: hooks, functorch, ew, ghost, ghost_fsdp, ghost_tp, no_op"
+            f"Allowed values: hooks, functorch, ew, ghost, ghost_fsdp, ghost_tp, hooks_fsdp, no_op"
         )
 
 
@@ -166,12 +169,14 @@ def get_hooks_class(grad_sample_mode: str):
         return GradSampleHooksFastGradientClippingFSDP
     elif grad_sample_mode == "ghost_tp":
         return GradSampleHooksFastGradientClippingTP
+    elif grad_sample_mode == "hooks_fsdp":
+        return GradSampleHooksFSDP
     elif grad_sample_mode == "no_op":
         return GradSampleHooksNoOp
     else:
         raise ValueError(
             f"Unexpected grad_sample_mode: {grad_sample_mode}. "
-            f"Hooks-based approach supports: hooks, functorch, ghost, ghost_fsdp, ghost_tp, no_op"
+            f"Hooks-based approach supports: hooks, functorch, ghost, ghost_fsdp, ghost_tp, hooks_fsdp, no_op"
         )
 
 

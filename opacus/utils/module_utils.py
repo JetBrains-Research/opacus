@@ -59,13 +59,17 @@ def trainable_modules(module: nn.Module) -> Iterable[Tuple[str, nn.Module]]:
     )
 
 
-def trainable_parameters(module: nn.Module) -> Iterable[Tuple[str, nn.Parameter]]:
+def trainable_parameters(
+    module: nn.Module, *, recurse: bool = True
+) -> Iterable[Tuple[str, nn.Parameter]]:
     """
     Recursively iterates over all parameters, returning those that
     are trainable (ie they want a grad).
     """
     yield from (
-        (p_name, p) for (p_name, p) in module.named_parameters() if p.requires_grad
+        (p_name, p)
+        for (p_name, p) in module.named_parameters(recurse=recurse)
+        if p.requires_grad
     )
 
 

@@ -68,6 +68,12 @@ def create_or_accumulate_grad_sample(
 
 def promote_current_grad_sample(p: nn.Parameter) -> None:
     if p.requires_grad:
+        # Check if _current_grad_sample exists - it may not if parameters were replaced
+        # (e.g., by FSDP1 FlatParameter) after hooks were attached but before gradients
+        # were accumulated for this parameter.
+        if not hasattr(p, "_current_grad_sample"):
+            return
+
         if p.grad_sample is not None:
             if isinstance(p.grad_sample, list):
                 p.grad_sample.append(p._current_grad_sample)
@@ -135,11 +141,15 @@ class GradSampleHooks(AbstractGradSampleHooks):
         self.hooks_enabled = False
         self.grad_accumulation_allowed = True
         self.force_functorch = force_functorch
+        self.max_batch_len = 0
         self.add_hooks(
             loss_reduction=loss_reduction,
             batch_first=batch_first,
             force_functorch=force_functorch,
         )
+
+    def _forward_pre_hook(self, _m, _i):
+        self.max_batch_len = 0
 
     def iterate_submodules(self, module: nn.Module) -> Iterable[nn.Module]:
         if has_trainable_params(module):
@@ -156,7 +166,7 @@ class GradSampleHooks(AbstractGradSampleHooks):
         for m in module.children():
             yield from self.iterate_submodules(m)
 
-    def _get_module_type(self, module: nn.Module) -> str:
+    def _get_module_type(self, module: nn.Module) -> type[nn.Module]:
         return type(module)
 
     def add_hooks(
@@ -212,6 +222,10 @@ class GradSampleHooks(AbstractGradSampleHooks):
                     )
                 )
             )
+
+        self.autograd_grad_sample_hooks.append(
+            self._module.register_forward_pre_hook(self._forward_pre_hook)
+        )
 
         self.enable_hooks()
 
@@ -277,7 +291,18 @@ class GradSampleHooks(AbstractGradSampleHooks):
             module.activations = []
         module.activations.append([t.detach() for t in forward_input])  # pyre-ignore
 
-        for _, p in trainable_parameters(module):
+        batch_dim = 0 if self.batch_first or type(module) is RNNLinear else 1
+        for t in forward_input:
+            if hasattr(t, "shape"):
+                self.max_batch_len = max(self.max_batch_len, t.shape[batch_dim])
+
+        # If we fall back to functorch for this module, it will compute grad samples for
+        # the whole sub-tree (`recurse=True`). In that case we must also track
+        # `_forward_counter` for all those parameters to later promote `_current_grad_sample`.
+        module_type = self._get_module_type(module)
+        recurse = self.force_functorch or module_type not in self.GRAD_SAMPLERS
+
+        for _, p in trainable_parameters(module, recurse=recurse):
             p._forward_counter += 1
 
     def capture_backprops_hook(
@@ -322,24 +347,23 @@ class GradSampleHooks(AbstractGradSampleHooks):
             loss_reduction=loss_reduction,
             batch_first=batch_first,
         )
-        if (
-            not self.force_functorch
-            and self._get_module_type(module) in self.GRAD_SAMPLERS
-        ):
-            grad_sampler_fn = self.GRAD_SAMPLERS[self._get_module_type(module)]
+        module_type = self._get_module_type(module)
+        if not self.force_functorch and module_type in self.GRAD_SAMPLERS:
+            grad_sampler_fn = self.GRAD_SAMPLERS[module_type]
         else:
             grad_sampler_fn = ft_compute_per_sample_gradient
 
         grad_samples = grad_sampler_fn(module, activations, backprops)
         for param, gs in grad_samples.items():
             create_or_accumulate_grad_sample(
-                param=param, grad_sample=gs, max_batch_len=module.max_batch_len
+                param=param, grad_sample=gs, max_batch_len=self.max_batch_len
             )
 
         # Detect end of current batch processing and switch accumulation
         # mode from sum to stacking. Used for RNNs and tied parameters
         # (See #417 for details)
-        for _, p in trainable_parameters(module):
+        recurse = self.force_functorch or module_type not in self.GRAD_SAMPLERS
+        for _, p in trainable_parameters(module, recurse=recurse):
             p._forward_counter -= 1
             if p._forward_counter == 0:
                 promote_current_grad_sample(p)
@@ -410,6 +434,14 @@ class GradSampleHooks(AbstractGradSampleHooks):
             backprops = backprops.permute(
                 [batch_dim] + [x for x in range(backprops.dim()) if x != batch_dim]
             )
+
+        if n == 1 and self.max_batch_len > 1:
+            activations = [
+                t.expand(self.max_batch_len, *t.shape[1:]) if t.shape[0] == 1 else t
+                for t in activations
+            ]
+            if backprops.shape[0] == 1:
+                backprops = backprops.expand(self.max_batch_len, *backprops.shape[1:])
 
         return activations, backprops
 
