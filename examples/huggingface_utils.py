@@ -401,16 +401,46 @@ class DPTrainer(Trainer):
         """
         state = self.accelerator.state
         
-        # Determine actual distributed/FSDP state from Accelerator
+        # Determine actual distributed/FSDP/TP state from Accelerator
         is_actually_distributed = state.distributed_type in {
             DistributedType.MULTI_GPU,
             DistributedType.FSDP,
         }
         is_actually_fsdp = state.distributed_type == DistributedType.FSDP
         
+        # Detect TP via ParallelismConfig (recommended) or deprecated torch_tp_plugin
+        parallelism_config = getattr(state, "parallelism_config", None)
+        is_tensor_parallel_new = (
+            parallelism_config is not None 
+            and getattr(parallelism_config, "tp_enabled", False)
+        )
+        is_tensor_parallel_deprecated = getattr(state, "torch_tp_plugin", None) is not None
+        is_tensor_parallel = is_tensor_parallel_new or is_tensor_parallel_deprecated
+        
         original_mode = self._original_grad_sample_mode
         
-        if is_actually_distributed or is_actually_fsdp:
+        # TP mode takes precedence - it requires hooks_tp
+        # hooks_tp inherits from hooks_fsdp, so it supports both TP-only and FSDP+TP (2D parallelism)
+        if is_tensor_parallel:
+            if original_mode in ["hooks", "hooks_tp", "hooks_fsdp"]:
+                self.privacy_args.grad_sample_mode = "hooks_tp"
+                parallelism_info = "TP" if not is_actually_fsdp else "FSDP+TP (2D parallelism)"
+                if is_tensor_parallel_new:
+                    logger.info(
+                        f"Auto-adjusted grad_sample_mode: {original_mode} -> hooks_tp "
+                        f"({parallelism_info} detected via parallelism_config)"
+                    )
+                else:
+                    logger.info(
+                        f"Auto-adjusted grad_sample_mode: {original_mode} -> hooks_tp "
+                        f"({parallelism_info} detected via torch_tp_plugin - deprecated)"
+                    )
+            else:
+                raise ValueError(
+                    f"Unsupported grad_sample_mode '{original_mode}' for tensor parallel training. "
+                    f"Only 'hooks', 'hooks_fsdp', and 'hooks_tp' are supported."
+                )
+        elif is_actually_distributed or is_actually_fsdp:
             # Distributed/FSDP mode - need hooks_fsdp
             if original_mode == "hooks":
                 self.privacy_args.grad_sample_mode = "hooks_fsdp"
@@ -559,6 +589,18 @@ class DPTrainer(Trainer):
         if state.distributed_type == DistributedType.FSDP:
             self._validate_fsdp_config(state)
         
+        # TP-specific validation (TP can be combined with other distributed types)
+        # Check both ParallelismConfig (recommended) and deprecated torch_tp_plugin
+        parallelism_config = getattr(state, "parallelism_config", None)
+        is_tp_via_config = (
+            parallelism_config is not None 
+            and getattr(parallelism_config, "tp_enabled", False)
+        )
+        is_tp_via_plugin = getattr(state, "torch_tp_plugin", None) is not None
+        
+        if is_tp_via_config or is_tp_via_plugin:
+            self._validate_tp_config(state, is_tp_via_config, is_tp_via_plugin)
+        
         logger.info(
             f"Distributed configuration validated for DP training: "
             f"distributed_type={state.distributed_type}, num_processes={state.num_processes}"
@@ -616,6 +658,51 @@ class DPTrainer(Trainer):
             f"FSDP configuration: fsdp_version={fsdp_version}, "
             f"cpu_ram_efficient_loading={getattr(plugin, 'cpu_ram_efficient_loading', False)}, "
             f"ignored_modules={getattr(plugin, 'ignored_modules', None)}"
+        )
+
+    def _validate_tp_config(self, state, is_tp_via_config: bool, is_tp_via_plugin: bool):
+        """Validate Tensor Parallelism configuration for DP training.
+        
+        Args:
+            state: AcceleratorState containing TP configuration.
+            is_tp_via_config: True if TP is enabled via ParallelismConfig (recommended).
+            is_tp_via_plugin: True if TP is enabled via deprecated TorchTensorParallelPlugin.
+            
+        Note: TP support is currently in beta. The model must be parallelized
+        with a compatible TP plan (ColwiseParallel/RowwiseParallel for linear layers).
+        Replicated parameters are not supported.
+        """
+        # Handle deprecated TorchTensorParallelPlugin
+        if is_tp_via_plugin and not is_tp_via_config:
+            raise ValueError(
+                "TorchTensorParallelPlugin is deprecated and not supported for DP training. "
+                "Please use ParallelismConfig with tp_size instead:\n\n"
+                "  accelerate launch \\\n"
+                "      --use_fsdp \\\n"
+                "      --fsdp_version 2 \\\n"
+                "      --use_parallelism_config \\\n"
+                "      --parallelism_config_tp_size 2 \\\n"
+                "      --num_processes N \\\n"
+                "      your_script.py\n\n"
+                "Note: ParallelismConfig requires FSDP to be enabled (2D parallelism: TP + FSDP)."
+            )
+        
+        # Get TP configuration from ParallelismConfig
+        parallelism_config = state.parallelism_config
+        tp_size = getattr(parallelism_config, "tp_size", None)
+        device_mesh = getattr(parallelism_config, "device_mesh", None)
+        
+        warnings.warn(
+            "Tensor Parallelism support for DP training is currently in beta. "
+            "Ensure your model is parallelized with a compatible TP plan "
+            "(ColwiseParallel/RowwiseParallel for linear layers). "
+            "Replicated parameters are not supported and must be frozen or sharded."
+        )
+        
+        logger.info(
+            f"TP configuration: tp_size={tp_size}, "
+            f"device_mesh={device_mesh}, "
+            f"distributed_type={state.distributed_type}"
         )
 
     def _get_model_for_hook_attachment(self, model: nn.Module) -> nn.Module:
