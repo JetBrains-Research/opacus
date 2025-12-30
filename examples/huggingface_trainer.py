@@ -43,12 +43,18 @@ Example Launch Commands
         huggingface_trainer.py \\
         --train_samples 1000 --eval_samples 200 --epochs 3
 
+**FP8 Mixed Precision (requires compatible GPU and TransformerEngine/MS-AMP):**
+
+    accelerate launch --mixed_precision fp8 --fp8_backend te huggingface_trainer.py \\
+        --train_samples 1000 --eval_samples 200 --epochs 3
+
 Supported Configurations
 ------------------------
 
 - Single GPU: Fully supported
 - DDP (via accelerate): Supported
 - FSDP2 (via accelerate): Supported with LoRA-style fine-tuning
+- FP8 Mixed Precision: Supported (uses functorch fallback for TE/MS-AMP layers)
 - FSDP1: **Not supported** - FSDP1 flattens multiple parameters into a single
   FlatParameter tensor, making per-sample gradient computation impossible.
   Use FSDP2 (--fsdp_version 2) instead.

@@ -468,6 +468,15 @@ class DPTrainer(Trainer):
                 f"Single-GPU mode detected (distributed_type={state.distributed_type}), "
                 f"using grad_sample_mode: {original_mode}"
             )
+        
+        # Log FP8 mixed precision info if enabled
+        mixed_precision = getattr(state, "_mixed_precision", "no")
+        if mixed_precision == "fp8":
+            logger.info(
+                "FP8 mixed precision detected. TransformerEngine/MS-AMP layers will use "
+                "functorch fallback for per-sample gradient computation. This is fully "
+                "supported but may have different performance characteristics than FP16/BF16."
+            )
 
     def _auto_configure_fsdp_for_dp(self):
         """Auto-configure FSDP plugin settings for DP training compatibility.
