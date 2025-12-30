@@ -30,6 +30,7 @@ from .grad_sample_module_fast_gradient_clipping_tp import (
     GradSampleHooksFastGradientClippingTP,
     GradSampleModuleFastGradientClippingTP,
 )
+from .grad_sample_module_cp import GradSampleHooksCP, GradSampleModuleCP
 from .grad_sample_module_fsdp import GradSampleHooksFSDP, GradSampleModuleFSDP
 from .grad_sample_module_tp import GradSampleHooksTP, GradSampleModuleTP
 from .gsm_base import AbstractGradSampleModule
@@ -111,6 +112,7 @@ def get_gsm_class(grad_sample_mode: str) -> Type[AbstractGradSampleModule]:
             - "ghost_tp": Ghost clipping with TP (GradSampleModuleFastGradientClippingTP)
             - "hooks_fsdp": Hooks-based with FSDP support (GradSampleModuleFSDP)
             - "hooks_tp": Hooks-based with TP support (GradSampleModuleTP)
+            - "hooks_cp": Hooks-based with CP support (GradSampleModuleCP)
             - "no_op": No-op implementation (GradSampleModuleNoOp)
 
     Returns:
@@ -133,12 +135,14 @@ def get_gsm_class(grad_sample_mode: str) -> Type[AbstractGradSampleModule]:
         return GradSampleModuleFSDP
     elif grad_sample_mode == "hooks_tp":
         return GradSampleModuleTP
+    elif grad_sample_mode == "hooks_cp":
+        return GradSampleModuleCP
     elif grad_sample_mode == "no_op":
         return GradSampleModuleNoOp
     else:
         raise ValueError(
             f"Unexpected grad_sample_mode: {grad_sample_mode}. "
-            f"Allowed values: hooks, functorch, ew, ghost, ghost_fsdp, ghost_tp, hooks_fsdp, hooks_tp, no_op"
+            f"Allowed values: hooks, functorch, ew, ghost, ghost_fsdp, ghost_tp, hooks_fsdp, hooks_tp, hooks_cp, no_op"
         )
 
 
@@ -160,6 +164,7 @@ def get_hooks_class(grad_sample_mode: str):
             - "ghost_tp": Ghost clipping with TP (GradSampleHooksFastGradientClippingTP)
             - "hooks_fsdp": Hooks-based with FSDP support (GradSampleHooksFSDP)
             - "hooks_tp": Hooks-based with TP support (GradSampleHooksTP)
+            - "hooks_cp": Hooks-based with CP support (GradSampleHooksCP)
             - "no_op": No-op implementation (GradSampleHooksNoOp)
 
     Returns:
@@ -180,12 +185,14 @@ def get_hooks_class(grad_sample_mode: str):
         return GradSampleHooksFSDP
     elif grad_sample_mode == "hooks_tp":
         return GradSampleHooksTP
+    elif grad_sample_mode == "hooks_cp":
+        return GradSampleHooksCP
     elif grad_sample_mode == "no_op":
         return GradSampleHooksNoOp
     else:
         raise ValueError(
             f"Unexpected grad_sample_mode: {grad_sample_mode}. "
-            f"Hooks-based approach supports: hooks, functorch, ghost, ghost_fsdp, ghost_tp, hooks_fsdp, hooks_tp, no_op"
+            f"Hooks-based approach supports: hooks, functorch, ghost, ghost_fsdp, ghost_tp, hooks_fsdp, hooks_tp, hooks_cp, no_op"
         )
 
 

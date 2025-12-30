@@ -417,11 +417,34 @@ class DPTrainer(Trainer):
         is_tensor_parallel_deprecated = getattr(state, "torch_tp_plugin", None) is not None
         is_tensor_parallel = is_tensor_parallel_new or is_tensor_parallel_deprecated
         
+        # Detect CP via ParallelismConfig
+        is_context_parallel = (
+            parallelism_config is not None
+            and getattr(parallelism_config, "cp_enabled", False)
+        )
+        
         original_mode = self._original_grad_sample_mode
         
-        # TP mode takes precedence - it requires hooks_tp
+        # CP mode takes highest precedence - it requires hooks_cp
+        # hooks_cp inherits from hooks_fsdp, so it supports FSDP+CP
+        if is_context_parallel:
+            if original_mode in ["hooks", "hooks_cp", "hooks_fsdp"]:
+                self.privacy_args.grad_sample_mode = "hooks_cp"
+                parallelism_info = "CP" if not is_tensor_parallel else "CP+TP"
+                if is_actually_fsdp:
+                    parallelism_info = f"FSDP+{parallelism_info}"
+                logger.info(
+                    f"Auto-adjusted grad_sample_mode: {original_mode} -> hooks_cp "
+                    f"({parallelism_info} detected via parallelism_config)"
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported grad_sample_mode '{original_mode}' for context parallel training. "
+                    f"Only 'hooks', 'hooks_fsdp', and 'hooks_cp' are supported."
+                )
+        # TP mode takes precedence over FSDP-only - it requires hooks_tp
         # hooks_tp inherits from hooks_fsdp, so it supports both TP-only and FSDP+TP (2D parallelism)
-        if is_tensor_parallel:
+        elif is_tensor_parallel:
             if original_mode in ["hooks", "hooks_tp", "hooks_fsdp"]:
                 self.privacy_args.grad_sample_mode = "hooks_tp"
                 parallelism_info = "TP" if not is_actually_fsdp else "FSDP+TP (2D parallelism)"
@@ -610,6 +633,15 @@ class DPTrainer(Trainer):
         if is_tp_via_config or is_tp_via_plugin:
             self._validate_tp_config(state, is_tp_via_config, is_tp_via_plugin)
         
+        # CP-specific validation (CP requires FSDP2)
+        is_cp_enabled = (
+            parallelism_config is not None
+            and getattr(parallelism_config, "cp_enabled", False)
+        )
+        
+        if is_cp_enabled:
+            self._validate_cp_config(state)
+        
         logger.info(
             f"Distributed configuration validated for DP training: "
             f"distributed_type={state.distributed_type}, num_processes={state.num_processes}"
@@ -711,6 +743,65 @@ class DPTrainer(Trainer):
         logger.info(
             f"TP configuration: tp_size={tp_size}, "
             f"device_mesh={device_mesh}, "
+            f"distributed_type={state.distributed_type}"
+        )
+
+    def _validate_cp_config(self, state):
+        """Validate Context Parallelism configuration for DP training.
+        
+        Args:
+            state: AcceleratorState containing CP configuration.
+            
+        Note: CP support is currently in beta. CP requires FSDP2 to be enabled
+        (cp_backend=torch uses FSDP2 under the hood). The sequence dimension
+        is split across CP ranks using ring attention.
+        """
+        parallelism_config = state.parallelism_config
+        cp_size = getattr(parallelism_config, "cp_size", None)
+        cp_backend = getattr(parallelism_config, "cp_backend", None)
+        
+        # CP requires FSDP2
+        if state.distributed_type != DistributedType.FSDP:
+            raise ValueError(
+                "Context Parallelism requires FSDP to be enabled. "
+                "Please use the following launch configuration:\n\n"
+                "  accelerate launch \\\n"
+                "      --use_fsdp \\\n"
+                "      --fsdp_version 2 \\\n"
+                "      --use_parallelism_config \\\n"
+                "      --parallelism_config_cp_size 2 \\\n"
+                "      --num_processes N \\\n"
+                "      your_script.py"
+            )
+        
+        # Only torch backend is supported (uses FSDP2-based ring attention)
+        if cp_backend and cp_backend != "torch":
+            raise ValueError(
+                f"Context Parallelism backend '{cp_backend}' is not supported for DP training. "
+                f"Only 'torch' backend (FSDP2-based) is supported. "
+                f"DeepSpeed-based CP is not compatible with Opacus per-sample gradient computation."
+            )
+        
+        # Workaround for accelerate bug: sp_backend defaults to "deepspeed" even when
+        # SP is not enabled, which causes _prepare_cp to skip setting _cp_context.
+        # See: https://github.com/huggingface/accelerate/issues/XXXX
+        sp_enabled = getattr(parallelism_config, "sp_enabled", False)
+        if not sp_enabled and getattr(parallelism_config, "sp_backend", None) == "deepspeed":
+            logger.info(
+                "Applying workaround: patching sp_backend to None (SP not enabled but "
+                "sp_backend defaults to 'deepspeed', which breaks CP initialization)"
+            )
+            object.__setattr__(parallelism_config, 'sp_backend', None)
+        
+        warnings.warn(
+            "Context Parallelism support for DP training is currently in beta. "
+            "CP splits the sequence dimension across devices using ring attention. "
+            "Per-sample gradient norms are aggregated across CP ranks."
+        )
+        
+        logger.info(
+            f"CP configuration: cp_size={cp_size}, "
+            f"cp_backend={cp_backend}, "
             f"distributed_type={state.distributed_type}"
         )
 
