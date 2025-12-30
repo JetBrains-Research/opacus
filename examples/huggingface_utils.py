@@ -15,7 +15,7 @@
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, List, Optional, Union
 
 import torch
 from accelerate.utils import DistributedType
@@ -27,6 +27,7 @@ from opacus.optimizers import (
     AdaClipDPOptimizer,
     DistributedAdaClipDPOptimizer,
     DPOptimizer,
+    DPPerLayerOptimizer,
     get_optimizer_class,
 )
 from opacus.utils.batch_memory_manager import wrap_data_loader
@@ -120,6 +121,9 @@ class PrivacyArguments:
     noise_multiplier: Optional[float] = None
     target_epsilon: Optional[float] = None
     target_delta: Optional[float] = None
+    # Per-layer clipping: list of max grad norms, one per trainable parameter.
+    # If None and clipping="per_layer", uses per_sample_max_grad_norm for all parameters.
+    per_layer_max_grad_norms: Optional[List[float]] = None
 
     def precalculate(self, num_samples: int, sample_rate: float, steps: int):
         """
@@ -903,6 +907,25 @@ class DPTrainer(Trainer):
                     "unclipped_num_std": self.privacy_args.unclipped_num_std,
                 }
             )
+
+        if issubclass(optim_class, DPPerLayerOptimizer):
+            # Per-layer clipping requires a list of max_grad_norms, one per parameter
+            trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+            num_params = len(trainable_params)
+            
+            if self.privacy_args.per_layer_max_grad_norms is not None:
+                # Use provided per-layer norms
+                if len(self.privacy_args.per_layer_max_grad_norms) != num_params:
+                    raise ValueError(
+                        f"per_layer_max_grad_norms has {len(self.privacy_args.per_layer_max_grad_norms)} "
+                        f"values but model has {num_params} trainable parameters"
+                    )
+                kwargs["max_grad_norm"] = self.privacy_args.per_layer_max_grad_norms
+            else:
+                # Use same max_grad_norm for all parameters
+                kwargs["max_grad_norm"] = [self.privacy_args.per_sample_max_grad_norm] * num_params
+            
+            logger.info(f"Per-layer clipping enabled with {num_params} parameters")
 
         self.optimizer = optim_class(**kwargs)
 

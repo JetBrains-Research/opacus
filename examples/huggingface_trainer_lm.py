@@ -105,6 +105,10 @@ Clipping Modes
   algorithm from "Differentially Private Learning with Adaptive Clipping"
   (https://arxiv.org/abs/1905.03871). The clipping bound adjusts to maintain
   a target fraction of unclipped samples (default: 50%).
+- **per_layer**: Per-parameter gradient clipping. Each parameter has its own
+  clipping threshold (defaults to per_sample_max_grad_norm for all parameters).
+  This can provide better utility in some cases by allowing different layers
+  to have different clipping bounds.
 
 Notes
 -----
@@ -113,7 +117,7 @@ Notes
 - Uses GPT-2 by default for quick testing. Use --model_name for other models.
 - For LLaMA models, you may need to authenticate with HuggingFace.
 - CP splits the sequence dimension across devices using ring attention.
-- Adaptive clipping works with all distributed modes (DDP, FSDP2, TP, CP).
+- All clipping modes (flat, adaptive, per_layer) work with all distributed modes.
 """
 
 import warnings
@@ -237,8 +241,8 @@ def main():
         "--clipping",
         type=str,
         default="flat",
-        choices=["flat", "adaptive"],
-        help="Clipping mode: 'flat' (fixed threshold) or 'adaptive' (auto-adjusting threshold)",
+        choices=["flat", "adaptive", "per_layer"],
+        help="Clipping mode: 'flat' (fixed threshold), 'adaptive' (auto-adjusting), or 'per_layer' (per-parameter clipping)",
     )
     parser.add_argument(
         "--target_unclipped_quantile",

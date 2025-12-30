@@ -14,6 +14,7 @@
 
 from .adaclipoptimizer import AdaClipDPOptimizer
 from .ddp_perlayeroptimizer import SimpleDistributedPerLayerOptimizer
+from .ddp_perlayeroptimizer_tp import DistributedPerLayerOptimizerTP
 from .ddpoptimizer import DistributedDPOptimizer
 from .ddpoptimizer_fast_gradient_clipping import (
     DistributedDPOptimizerFastGradientClipping,
@@ -31,6 +32,7 @@ __all__ = [
     "DistributedAdaClipDPOptimizer",
     "DistributedDPOptimizer",
     "DistributedDPOptimizerTP",
+    "DistributedPerLayerOptimizerTP",
     "DPOptimizer",
     "DPOptimizerFastGradientClipping",
     "DistributedDPOptimizerFastGradientClipping",
@@ -61,10 +63,13 @@ def get_optimizer_class(clipping: str, distributed: bool, grad_sample_mode: str 
         # hooks_fsdp is the unified mode that handles FSDP, TP, and CP
         # DistributedDPOptimizerTP handles all-reduce for sharded gradients
         # DistributedAdaClipDPOptimizer handles adaptive clipping with distributed
+        # DistributedPerLayerOptimizerTP handles per-layer clipping with distributed
         if clipping == "flat" and distributed is True:
             return DistributedDPOptimizerTP
         elif clipping == "adaptive" and distributed is True:
             return DistributedAdaClipDPOptimizer
+        elif clipping == "per_layer" and distributed is True:
+            return DistributedPerLayerOptimizerTP
         else:
             raise ValueError(
                 f"Unsupported combination of parameters. Clipping: {clipping}, distributed: {distributed}, and grad_sample_mode: {grad_sample_mode}"
