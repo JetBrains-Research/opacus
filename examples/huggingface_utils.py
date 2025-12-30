@@ -425,43 +425,36 @@ class DPTrainer(Trainer):
         
         original_mode = self._original_grad_sample_mode
         
-        # CP mode takes highest precedence - it requires hooks_cp
-        # hooks_cp inherits from hooks_fsdp, so it supports FSDP+CP
-        if is_context_parallel:
-            if original_mode in ["hooks", "hooks_cp", "hooks_fsdp"]:
-                self.privacy_args.grad_sample_mode = "hooks_cp"
-                parallelism_info = "CP" if not is_tensor_parallel else "CP+TP"
+        # Use unified hooks_fsdp mode when TP and/or CP is enabled
+        # GradSampleHooksFSDP handles all combinations: FSDP, FSDP+TP, FSDP+CP, FSDP+TP+CP
+        # TP is auto-detected via DTensor parameters, CP is enabled via cp_group parameter
+        if is_tensor_parallel or is_context_parallel:
+            supported_modes = ["hooks", "hooks_fsdp", "hooks_tp", "hooks_cp"]
+            if original_mode in supported_modes:
+                self.privacy_args.grad_sample_mode = "hooks_fsdp"
+                
+                # Build parallelism info string
+                parallelism_parts = []
                 if is_actually_fsdp:
-                    parallelism_info = f"FSDP+{parallelism_info}"
+                    parallelism_parts.append("FSDP")
+                if is_tensor_parallel:
+                    parallelism_parts.append("TP")
+                if is_context_parallel:
+                    parallelism_parts.append("CP")
+                parallelism_info = "+".join(parallelism_parts)
+                
+                # Store CP flag for later use when creating hooks
+                # TP is auto-detected by GradSampleHooksFSDP via DTensor parameters
+                self._cp_enabled = is_context_parallel
+                
                 logger.info(
-                    f"Auto-adjusted grad_sample_mode: {original_mode} -> hooks_cp "
+                    f"Auto-adjusted grad_sample_mode: {original_mode} -> hooks_fsdp "
                     f"({parallelism_info} detected via parallelism_config)"
                 )
             else:
                 raise ValueError(
-                    f"Unsupported grad_sample_mode '{original_mode}' for context parallel training. "
-                    f"Only 'hooks', 'hooks_fsdp', and 'hooks_cp' are supported."
-                )
-        # TP mode takes precedence over FSDP-only - it requires hooks_tp
-        # hooks_tp inherits from hooks_fsdp, so it supports both TP-only and FSDP+TP (2D parallelism)
-        elif is_tensor_parallel:
-            if original_mode in ["hooks", "hooks_tp", "hooks_fsdp"]:
-                self.privacy_args.grad_sample_mode = "hooks_tp"
-                parallelism_info = "TP" if not is_actually_fsdp else "FSDP+TP (2D parallelism)"
-                if is_tensor_parallel_new:
-                    logger.info(
-                        f"Auto-adjusted grad_sample_mode: {original_mode} -> hooks_tp "
-                        f"({parallelism_info} detected via parallelism_config)"
-                    )
-                else:
-                    logger.info(
-                        f"Auto-adjusted grad_sample_mode: {original_mode} -> hooks_tp "
-                        f"({parallelism_info} detected via torch_tp_plugin - deprecated)"
-                    )
-            else:
-                raise ValueError(
-                    f"Unsupported grad_sample_mode '{original_mode}' for tensor parallel training. "
-                    f"Only 'hooks', 'hooks_fsdp', and 'hooks_tp' are supported."
+                    f"Unsupported grad_sample_mode '{original_mode}' for distributed parallel training. "
+                    f"Only 'hooks', 'hooks_fsdp', 'hooks_tp', and 'hooks_cp' are supported."
                 )
         elif is_actually_distributed or is_actually_fsdp:
             # Distributed/FSDP mode - need hooks_fsdp
@@ -830,11 +823,39 @@ class DPTrainer(Trainer):
         if self.hooks is None:
             model = model or self.model
             model = self._get_model_for_hook_attachment(model)
+            
+            # Build kwargs for wrap_model
+            kwargs = {}
+            
+            # Pass cp_group when CP is enabled
+            if getattr(self, "_cp_enabled", False):
+                cp_group = self._get_cp_process_group()
+                if cp_group is not None:
+                    kwargs["cp_group"] = cp_group
+            
             self.hooks = wrap_model(
                 model,
                 grad_sample_mode=self.privacy_args.grad_sample_mode,
                 wrap_model=False,
+                **kwargs,
             )
+    
+    def _get_cp_process_group(self):
+        """Get the Context Parallelism process group from accelerate's device mesh."""
+        try:
+            state = self.accelerator.state
+            device_mesh = getattr(state, "device_mesh", None)
+            if device_mesh is not None:
+                # Try to get the CP submesh and its process group
+                # The CP dimension is named "cp" in the device mesh
+                try:
+                    cp_mesh = device_mesh["cp"]
+                    return cp_mesh.get_group()
+                except (KeyError, RuntimeError):
+                    pass
+            return None
+        except Exception:
+            return None
 
     def _wrap_model(self, model, training=True, dataloader=None):
         wrapped_model = super()._wrap_model(

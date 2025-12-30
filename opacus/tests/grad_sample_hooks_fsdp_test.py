@@ -1015,5 +1015,360 @@ class TestStandardOpacusUsage(unittest.TestCase):
                 self.assertIsNone(p.grad_sample)
 
 
+# =============================================================================
+# Tests for Tensor Parallelism (TP) Support in Unified GradSampleHooksFSDP
+# =============================================================================
+
+class TestTPSupportInUnifiedFSDP(unittest.TestCase):
+    """Tests for TP (Tensor Parallelism) support in the unified GradSampleHooksFSDP class.
+    
+    TP is auto-detected via DTensor parameters. These tests verify the TP-related
+    methods work correctly with both regular tensors and DTensors.
+    """
+
+    def test_is_dtensor_with_regular_tensor(self):
+        """Test _is_dtensor returns False for regular tensors."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        regular_tensor = torch.randn(4, 4)
+        self.assertFalse(hooks._is_dtensor(regular_tensor))
+
+    def test_to_local_tensor_with_regular_tensor(self):
+        """Test _to_local_tensor returns the same tensor for regular tensors."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        regular_tensor = torch.randn(4, 4)
+        result = hooks._to_local_tensor(regular_tensor)
+        self.assertIs(result, regular_tensor)
+
+    def test_analyze_tp_placements_non_dtensor(self):
+        """Test _analyze_tp_placements with non-DTensor model."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        # Initially not analyzed
+        self.assertFalse(hooks._tp_analyzed)
+        self.assertFalse(hooks._has_dtensor_params)
+        
+        # Trigger analysis
+        hooks._analyze_tp_placements()
+        
+        # After analysis
+        self.assertTrue(hooks._tp_analyzed)
+        self.assertFalse(hooks._has_dtensor_params)  # No DTensors in regular model
+        
+        # All params should have _tp_merge_flag = False
+        for p in model.parameters():
+            if p.requires_grad:
+                self.assertTrue(hasattr(p, "_tp_merge_flag"))
+                self.assertFalse(p._tp_merge_flag)
+
+    def test_tp_analysis_only_runs_once(self):
+        """Test that TP analysis only runs once (lazy initialization)."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        # First analysis
+        hooks._analyze_tp_placements()
+        self.assertTrue(hooks._tp_analyzed)
+        
+        # Modify flag to verify second call doesn't re-analyze
+        hooks._has_dtensor_params = True
+        hooks._analyze_tp_placements()
+        
+        # Should still be True (not reset)
+        self.assertTrue(hooks._has_dtensor_params)
+
+    def test_tp_merge_flag_set_on_forward(self):
+        """Test that _tp_merge_flag is set during forward pass."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        hooks.enable_hooks()
+        model.train()
+        
+        # Before forward, params don't have _tp_merge_flag
+        for p in model.parameters():
+            self.assertFalse(hasattr(p, "_tp_merge_flag"))
+        
+        # Forward pass triggers lazy TP analysis
+        x = torch.randn(4, 4)
+        output = model(x)
+        
+        # After forward, params should have _tp_merge_flag
+        for p in model.parameters():
+            if p.requires_grad:
+                self.assertTrue(hasattr(p, "_tp_merge_flag"))
+
+    def test_grad_sample_with_non_dtensor_model(self):
+        """Test full workflow with non-DTensor model (TP auto-detection finds no DTensors)."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        hooks.enable_hooks()
+        model.train()
+        
+        batch_size = 4
+        x = torch.randn(batch_size, 4)
+        output = model(x)
+        loss = output.sum()
+        loss.backward()
+        
+        # Verify grad_sample is computed
+        for p in model.parameters():
+            if p.requires_grad:
+                self.assertTrue(hasattr(p, "grad_sample"))
+                self.assertIsNotNone(p.grad_sample)
+                self.assertEqual(p.grad_sample.shape[0], batch_size)
+        
+        hooks.cleanup()
+
+
+# =============================================================================
+# Tests for Context Parallelism (CP) Support in Unified GradSampleHooksFSDP
+# =============================================================================
+
+class TestCPSupportInUnifiedFSDP(unittest.TestCase):
+    """Tests for CP (Context Parallelism) support in the unified GradSampleHooksFSDP class.
+    
+    CP is enabled via the cp_group parameter. These tests verify CP-related
+    methods work correctly.
+    """
+
+    def test_cp_group_none_by_default(self):
+        """Test that cp_group is None by default."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        self.assertIsNone(hooks.cp_group)
+        self.assertIsNone(hooks._cp_world_size)
+        self.assertIsNone(hooks._cp_rank)
+
+    def test_should_aggregate_returns_false_without_distributed(self):
+        """Test _should_aggregate_across_cp returns False when not distributed."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        # Without distributed initialized, should return False
+        if not dist.is_initialized():
+            self.assertFalse(hooks._should_aggregate_across_cp())
+
+    def test_should_aggregate_returns_false_without_cp_group(self):
+        """Test _should_aggregate_across_cp returns False when cp_group is None."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        # Even with distributed, no cp_group means no aggregation
+        self.assertFalse(hooks._should_aggregate_across_cp())
+
+    def test_set_cp_group_updates_attributes(self):
+        """Test set_cp_group updates cp_group and related attributes."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        # Create a mock process group
+        with _SingleRankProcessGroup():
+            # Use default process group as cp_group
+            default_pg = dist.distributed_c10d._get_default_group()
+            hooks.set_cp_group(default_pg)
+            
+            self.assertIsNotNone(hooks.cp_group)
+            self.assertEqual(hooks._cp_world_size, 1)
+            self.assertEqual(hooks._cp_rank, 0)
+
+    def test_cp_group_in_constructor(self):
+        """Test passing cp_group in constructor."""
+        model = SimpleModel()
+        
+        with _SingleRankProcessGroup():
+            default_pg = dist.distributed_c10d._get_default_group()
+            hooks = GradSampleHooksFSDP(model, strict=False, cp_group=default_pg)
+            
+            self.assertIsNotNone(hooks.cp_group)
+            self.assertEqual(hooks._cp_world_size, 1)
+            self.assertEqual(hooks._cp_rank, 0)
+
+    def test_grad_sample_with_cp_enabled(self):
+        """Test full workflow with CP enabled."""
+        model = SimpleModel()
+        
+        with _SingleRankProcessGroup():
+            default_pg = dist.distributed_c10d._get_default_group()
+            hooks = GradSampleHooksFSDP(model, strict=False, cp_group=default_pg)
+            hooks.enable_hooks()
+            model.train()
+            
+            batch_size = 4
+            x = torch.randn(batch_size, 4)
+            output = model(x)
+            loss = output.sum()
+            loss.backward()
+            
+            # Verify grad_sample is computed
+            for p in model.parameters():
+                if p.requires_grad:
+                    self.assertTrue(hasattr(p, "grad_sample"))
+                    self.assertIsNotNone(p.grad_sample)
+            
+            hooks.cleanup()
+
+
+# =============================================================================
+# Tests for Combined TP+CP Support in Unified GradSampleHooksFSDP
+# =============================================================================
+
+class TestCombinedTPCPSupport(unittest.TestCase):
+    """Tests for combined TP+CP support in the unified GradSampleHooksFSDP class."""
+
+    def test_unified_class_supports_both_tp_and_cp(self):
+        """Test that the unified class can be configured for both TP and CP."""
+        model = SimpleModel()
+        
+        with _SingleRankProcessGroup():
+            default_pg = dist.distributed_c10d._get_default_group()
+            hooks = GradSampleHooksFSDP(model, strict=False, cp_group=default_pg)
+            
+            # CP is configured
+            self.assertIsNotNone(hooks.cp_group)
+            
+            # TP analysis is available (will be triggered on forward)
+            self.assertFalse(hooks._tp_analyzed)
+            
+            # Trigger TP analysis
+            hooks._analyze_tp_placements()
+            self.assertTrue(hooks._tp_analyzed)
+
+    def test_get_per_sample_norms_non_distributed(self):
+        """Test get_per_sample_norms works in non-distributed mode."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        hooks.enable_hooks()
+        model.train()
+        
+        batch_size = 4
+        x = torch.randn(batch_size, 4)
+        output = model(x)
+        loss = output.sum()
+        loss.backward()
+        
+        # Get per-sample norms
+        norms = hooks.get_per_sample_norms()
+        
+        self.assertEqual(norms.shape, (batch_size,))
+        self.assertTrue(torch.all(norms >= 0))
+        
+        hooks.cleanup()
+
+    def test_compute_local_norms(self):
+        """Test _compute_local_norms method."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        hooks.enable_hooks()
+        model.train()
+        
+        batch_size = 4
+        x = torch.randn(batch_size, 4)
+        output = model(x)
+        loss = output.sum()
+        loss.backward()
+        
+        # Compute local norms
+        norms = hooks._compute_local_norms()
+        
+        self.assertEqual(norms.shape, (batch_size,))
+        self.assertTrue(torch.all(norms >= 0))
+        
+        hooks.cleanup()
+
+
+# =============================================================================
+# Tests for GradSampleModuleFSDP with TP/CP Support
+# =============================================================================
+
+class TestGradSampleModuleFSDPWithTPCP(unittest.TestCase):
+    """Tests for GradSampleModuleFSDP wrapper with TP/CP support."""
+
+    def test_module_accepts_cp_group(self):
+        """Test GradSampleModuleFSDP accepts cp_group parameter."""
+        model = SimpleModel()
+        
+        with _SingleRankProcessGroup():
+            default_pg = dist.distributed_c10d._get_default_group()
+            gsm = GradSampleModuleFSDP(model, strict=False, cp_group=default_pg)
+            
+            self.assertIsNotNone(gsm.cp_group)
+            self.assertEqual(gsm._cp_world_size, 1)
+
+    def test_module_workflow_with_cp(self):
+        """Test full workflow with GradSampleModuleFSDP and CP enabled."""
+        model = SimpleModel()
+        
+        with _SingleRankProcessGroup():
+            default_pg = dist.distributed_c10d._get_default_group()
+            gsm = GradSampleModuleFSDP(model, strict=False, cp_group=default_pg)
+            gsm.enable_hooks()
+            gsm.train()
+            
+            batch_size = 4
+            x = torch.randn(batch_size, 4)
+            output = gsm(x)
+            loss = output.sum()
+            loss.backward()
+            
+            # Verify grad_sample is computed
+            for p in gsm.parameters():
+                if p.requires_grad:
+                    self.assertTrue(hasattr(p, "grad_sample"))
+                    self.assertIsNotNone(p.grad_sample)
+
+
+# =============================================================================
+# Tests for Inheritance and Class Structure
+# =============================================================================
+
+class TestUnifiedClassInheritance(unittest.TestCase):
+    """Tests verifying the unified class inheritance structure."""
+
+    def test_hooks_fsdp_inherits_from_grad_sample_hooks(self):
+        """Test GradSampleHooksFSDP inherits from GradSampleHooks."""
+        self.assertTrue(issubclass(GradSampleHooksFSDP, GradSampleHooks))
+
+    def test_module_fsdp_inherits_from_hooks_fsdp(self):
+        """Test GradSampleModuleFSDP inherits from GradSampleHooksFSDP."""
+        self.assertTrue(issubclass(GradSampleModuleFSDP, GradSampleHooksFSDP))
+
+    def test_unified_class_has_tp_methods(self):
+        """Test unified class has TP-related methods."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        self.assertTrue(hasattr(hooks, "_is_dtensor"))
+        self.assertTrue(hasattr(hooks, "_to_local_tensor"))
+        self.assertTrue(hasattr(hooks, "_analyze_tp_placements"))
+        self.assertTrue(callable(hooks._is_dtensor))
+        self.assertTrue(callable(hooks._to_local_tensor))
+        self.assertTrue(callable(hooks._analyze_tp_placements))
+
+    def test_unified_class_has_cp_methods(self):
+        """Test unified class has CP-related methods."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        self.assertTrue(hasattr(hooks, "set_cp_group"))
+        self.assertTrue(hasattr(hooks, "_should_aggregate_across_cp"))
+        self.assertTrue(hasattr(hooks, "_initialize_cp_info"))
+        self.assertTrue(callable(hooks.set_cp_group))
+        self.assertTrue(callable(hooks._should_aggregate_across_cp))
+        self.assertTrue(callable(hooks._initialize_cp_info))
+
+    def test_unified_class_has_fsdp_methods(self):
+        """Test unified class has FSDP-related methods."""
+        model = SimpleModel()
+        hooks = GradSampleHooksFSDP(model, strict=False)
+        
+        self.assertTrue(hasattr(hooks, "_get_module_type"))
+        self.assertTrue(callable(hooks._get_module_type))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -55,7 +55,9 @@ def get_optimizer_class(clipping: str, distributed: bool, grad_sample_mode: str 
             raise ValueError(
                 f"Unsupported combination of parameters. Clipping: {clipping}, distributed: {distributed}, and grad_sample_mode: {grad_sample_mode}"
             )
-    elif grad_sample_mode == "hooks_tp":
+    elif grad_sample_mode in ("hooks_tp", "hooks_fsdp"):
+        # hooks_fsdp is the unified mode that handles FSDP, TP, and CP
+        # DistributedDPOptimizerTP handles all-reduce for sharded gradients
         if clipping == "flat" and distributed is True:
             return DistributedDPOptimizerTP
         else:
