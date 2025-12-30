@@ -25,6 +25,7 @@ from opacus.data_loader import DPDataLoader
 from opacus.grad_sample.utils import wrap_model
 from opacus.optimizers import (
     AdaClipDPOptimizer,
+    DistributedAdaClipDPOptimizer,
     DPOptimizer,
     get_optimizer_class,
 )

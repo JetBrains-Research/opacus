@@ -72,6 +72,21 @@ Example Launch Commands
         huggingface_trainer_lm.py \\
         --train_samples 500 --epochs 1
 
+**Adaptive Clipping (auto-adjusting gradient clipping threshold):**
+
+    CUDA_VISIBLE_DEVICES=0 python huggingface_trainer_lm.py \\
+        --train_samples 500 --epochs 1 --clipping adaptive
+
+**Adaptive Clipping with FSDP2:**
+
+    accelerate launch \\
+        --use_fsdp \\
+        --fsdp_version 2 \\
+        --fsdp_cpu_ram_efficient_loading false \\
+        --num_processes 2 \\
+        huggingface_trainer_lm.py \\
+        --train_samples 500 --epochs 1 --clipping adaptive
+
 Supported Configurations
 ------------------------
 
@@ -82,6 +97,15 @@ Supported Configurations
 - Tensor Parallelism (TP): Beta support
 - FSDP1: **Not supported**
 
+Clipping Modes
+--------------
+
+- **flat** (default): Fixed gradient clipping threshold (per_sample_max_grad_norm=0.5)
+- **adaptive**: Auto-adjusting threshold based on gradient statistics. Uses the
+  algorithm from "Differentially Private Learning with Adaptive Clipping"
+  (https://arxiv.org/abs/1905.03871). The clipping bound adjusts to maintain
+  a target fraction of unclipped samples (default: 50%).
+
 Notes
 -----
 
@@ -89,6 +113,7 @@ Notes
 - Uses GPT-2 by default for quick testing. Use --model_name for other models.
 - For LLaMA models, you may need to authenticate with HuggingFace.
 - CP splits the sequence dimension across devices using ring attention.
+- Adaptive clipping works with all distributed modes (DDP, FSDP2, TP, CP).
 """
 
 import warnings
@@ -207,6 +232,25 @@ def main():
         default="hooks",
         choices=["hooks", "functorch"],
         help="Opacus grad_sample_mode (auto-adjusted for distributed)",
+    )
+    parser.add_argument(
+        "--clipping",
+        type=str,
+        default="flat",
+        choices=["flat", "adaptive"],
+        help="Clipping mode: 'flat' (fixed threshold) or 'adaptive' (auto-adjusting threshold)",
+    )
+    parser.add_argument(
+        "--target_unclipped_quantile",
+        type=float,
+        default=0.5,
+        help="Target fraction of unclipped samples for adaptive clipping (default: 0.5)",
+    )
+    parser.add_argument(
+        "--clipbound_learning_rate",
+        type=float,
+        default=0.2,
+        help="Learning rate for adaptive clipping bound updates (default: 0.2)",
     )
     args = parser.parse_args()
 
@@ -336,6 +380,9 @@ def main():
         target_epsilon=args.target_epsilon,
         target_delta=1e-5,
         grad_sample_mode=args.grad_sample_mode,
+        clipping=args.clipping,
+        target_unclipped_quantile=args.target_unclipped_quantile,
+        clipbound_learning_rate=args.clipbound_learning_rate,
     )
 
     # 8. Initialize DPTrainer

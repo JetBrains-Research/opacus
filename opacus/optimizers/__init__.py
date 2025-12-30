@@ -19,6 +19,7 @@ from .ddpoptimizer_fast_gradient_clipping import (
     DistributedDPOptimizerFastGradientClipping,
 )
 from .ddpoptimizer_tp import DistributedDPOptimizerTP
+from .distributed_adaclipoptimizer import DistributedAdaClipDPOptimizer
 from .fsdpoptimizer_fast_gradient_clipping import FSDPOptimizerFastGradientClipping
 from .optimizer import DPOptimizer
 from .optimizer_fast_gradient_clipping import DPOptimizerFastGradientClipping
@@ -27,6 +28,7 @@ from .perlayeroptimizer import DPPerLayerOptimizer
 
 __all__ = [
     "AdaClipDPOptimizer",
+    "DistributedAdaClipDPOptimizer",
     "DistributedDPOptimizer",
     "DistributedDPOptimizerTP",
     "DPOptimizer",
@@ -58,8 +60,11 @@ def get_optimizer_class(clipping: str, distributed: bool, grad_sample_mode: str 
     elif grad_sample_mode in ("hooks_tp", "hooks_fsdp"):
         # hooks_fsdp is the unified mode that handles FSDP, TP, and CP
         # DistributedDPOptimizerTP handles all-reduce for sharded gradients
+        # DistributedAdaClipDPOptimizer handles adaptive clipping with distributed
         if clipping == "flat" and distributed is True:
             return DistributedDPOptimizerTP
+        elif clipping == "adaptive" and distributed is True:
+            return DistributedAdaClipDPOptimizer
         else:
             raise ValueError(
                 f"Unsupported combination of parameters. Clipping: {clipping}, distributed: {distributed}, and grad_sample_mode: {grad_sample_mode}"
@@ -77,6 +82,8 @@ def get_optimizer_class(clipping: str, distributed: bool, grad_sample_mode: str 
             raise ValueError(f"Unexpected grad_sample_mode: {grad_sample_mode}")
     elif clipping == "adaptive" and distributed is False:
         return AdaClipDPOptimizer
+    elif clipping == "adaptive" and distributed is True:
+        return DistributedAdaClipDPOptimizer
     raise ValueError(
         f"Unexpected optimizer parameters. Clipping: {clipping}, distributed: {distributed}"
     )
