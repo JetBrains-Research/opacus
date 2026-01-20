@@ -34,7 +34,7 @@ from opacus.utils.module_utils import (
     trainable_modules,
     trainable_parameters,
 )
-
+from opacus.validators.errors import UnsupportedModuleError
 
 logger = logging.getLogger(__name__)
 logger.disabled = True
@@ -129,11 +129,19 @@ class GradSampleHooks(AbstractGradSampleHooks):
             m,
             batch_first=batch_first,
             loss_reduction=loss_reduction,
-            strict=strict,
         )
+
+        errors = self.validate(module=m, strict=strict)
+        if errors and not strict:
+            logger.info(
+                f"Validation found the following errors: {errors}."
+                "Using non-strict mode, continuing"
+            )
 
         self.hooks_enabled = False
         self.grad_accumulation_allowed = True
+        self.batch_first = batch_first
+        self.loss_reduction = loss_reduction
         self.force_functorch = force_functorch
         self.add_hooks(
             loss_reduction=loss_reduction,
@@ -188,7 +196,6 @@ class GradSampleHooks(AbstractGradSampleHooks):
             raise ValueError("Trying to add hooks twice to the same model")
         else:
             self._module.autograd_grad_sample_hooks = []
-            self.autograd_grad_sample_hooks = self._module.autograd_grad_sample_hooks
 
         for module in self.iterate_submodules(self._module):
             # Do not add hooks to DPRNN, DPLSTM or DPGRU as the hooks are handled by the `RNNLinear`
@@ -199,11 +206,11 @@ class GradSampleHooks(AbstractGradSampleHooks):
             if force_functorch or not (module_type in self.GRAD_SAMPLERS):
                 prepare_layer(module, batch_first=batch_first)
 
-            self.autograd_grad_sample_hooks.append(
+            self._module.autograd_grad_sample_hooks.append(
                 module.register_forward_hook(self.capture_activations_hook)
             )
 
-            self.autograd_grad_sample_hooks.append(
+            self._module.autograd_grad_sample_hooks.append(
                 module.register_full_backward_hook(
                     partial(
                         self.capture_backprops_hook,
@@ -228,13 +235,11 @@ class GradSampleHooks(AbstractGradSampleHooks):
                     handle.remove()
                 delattr(p, "ddp_hooks")
 
-        if hasattr(self, "autograd_grad_sample_hooks"):
-            while self.autograd_grad_sample_hooks:
-                handle = self.autograd_grad_sample_hooks.pop()
+        if hasattr(self._module, "autograd_grad_sample_hooks"):
+            while self._module.autograd_grad_sample_hooks:
+                handle = self._module.autograd_grad_sample_hooks.pop()
                 handle.remove()
-            delattr(self, "autograd_grad_sample_hooks")
-            if hasattr(self._module, "autograd_grad_sample_hooks"):
-                delattr(self._module, "autograd_grad_sample_hooks")
+            delattr(self._module, "autograd_grad_sample_hooks")
 
         # Remove functorch hooks
         for _module_name, module in trainable_modules(self._module):
@@ -435,6 +440,47 @@ class GradSampleHooks(AbstractGradSampleHooks):
 
         return True
 
+    @classmethod
+    def validate(
+        cls, module: nn.Module, *, strict: bool = False
+    ) -> List[NotImplementedError]:
+        """
+        Check if per sample gradients can be fully computed for a given model
+
+        Args:
+            module: nn.Module to be checked
+            raise_if_error: Behaviour in case of a negative check result. Will
+            return the list of exceptions if set to ``False``, and throw otherwise
+
+        Returns:
+            Empty list of validation is successful.
+            List of validation errors  if ``raise_if_error=False`` and
+            unsupported modules are found
+
+        Raises:
+            NotImplementedError
+                If ``raise_if_error=True`` and unsupported modules are found
+        """
+        errors = []
+        errors.extend(
+            [
+                NotImplementedError(
+                    f"Model contains a trainable layer with buffers"
+                    f"that Opacus doesn't currently support({m_name}:{m}). "
+                )
+                for m_name, m in trainable_modules(module)
+                # With functorch, all modules are trainable
+                # We still want to avoid module that have buffers (e.g. BatchNorm)
+                # as the buffers are not private
+                if len(list(m.buffers())) > 0
+            ]
+        )
+        # raise or return errors as needed
+        if strict and len(errors) > 0:
+            raise UnsupportedModuleError(errors)
+        else:
+            return errors
+
     def forbid_grad_accumulation(self):
         self.grad_accumulation_allowed = False
 
@@ -445,8 +491,8 @@ class GradSampleHooks(AbstractGradSampleHooks):
         """
         Cleanup hooks and all hook-related attributes.
         """
-        self.remove_hooks()
         super().cleanup()
+        self.remove_hooks()
 
 
 class GradSampleModule(GradSampleHooks, AbstractGradSampleModule):
@@ -501,7 +547,19 @@ class GradSampleModule(GradSampleHooks, AbstractGradSampleModule):
             strict=strict,
             force_functorch=force_functorch,
         )
-        self.grad_accumulation_hook = None
+        self.autograd_grad_sample_hooks = self._module.autograd_grad_sample_hooks
+
+    def forward(self, *args, **kwargs):
+        return self._module(*args, **kwargs)
+
+    def remove_hooks(self) -> None:
+        super().remove_hooks()
+        delattr(self, "autograd_grad_sample_hooks")
+
+    def _close(self):
+        super()._close()
+        self.remove_hooks()
+
 
 
 def _get_batch_size(*, module: nn.Module, batch_dim: int) -> int:

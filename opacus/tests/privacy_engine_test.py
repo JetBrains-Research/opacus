@@ -146,11 +146,9 @@ class BasePrivacyEngineTest(ABC):
             poisson_sampling=poisson_sampling,
             clipping=clipping,
             grad_sample_mode=grad_sample_mode,
-            batch_first=self.BATCH_FIRST,
             wrap_model=self.WRAP_MODEL,
         )
 
-        # In non-wrapping mode, use original model; in wrapped mode, use wrapper
         if self.WRAP_MODEL:
             model = hooks_or_wrapper
 
@@ -470,7 +468,6 @@ class BasePrivacyEngineTest(ABC):
             )
         )
 
-        # In non-wrapping mode, use original model; in wrapped mode, use wrapper
         if self.WRAP_MODEL:
             model = hooks_or_wrapper
 
@@ -1051,11 +1048,6 @@ class PrivacyEngineConvNetHooksTest(PrivacyEngineConvNetTest):
         super().setUp()
         self.WRAP_MODEL = False
 
-    def tearDown(self) -> None:
-        """Clean up hooks after each test."""
-        # The model might have hooks attached that needs cleanup
-        pass
-
 
 class PrivacyEngineConvNetFrozenHooksTest(PrivacyEngineConvNetFrozenTest):
     """Test ConvNet with frozen layers using hooks-based approach."""
@@ -1063,10 +1055,6 @@ class PrivacyEngineConvNetFrozenHooksTest(PrivacyEngineConvNetFrozenTest):
     def setUp(self) -> None:
         super().setUp()
         self.WRAP_MODEL = False
-
-    def tearDown(self) -> None:
-        """Clean up hooks after each test."""
-        pass
 
 
 class PrivacyEngineTextHooksTest(PrivacyEngineTextTest):
@@ -1076,10 +1064,6 @@ class PrivacyEngineTextHooksTest(PrivacyEngineTextTest):
         super().setUp()
         self.WRAP_MODEL = False
 
-    def tearDown(self) -> None:
-        """Clean up hooks after each test."""
-        pass
-
 
 class PrivacyEngineTiedWeightsHooksTest(PrivacyEngineTiedWeightsTest):
     """Test tied weights with hooks-based approach."""
@@ -1088,10 +1072,6 @@ class PrivacyEngineTiedWeightsHooksTest(PrivacyEngineTiedWeightsTest):
         super().setUp()
         self.WRAP_MODEL = False
 
-    def tearDown(self) -> None:
-        """Clean up hooks after each test."""
-        pass
-
 
 class PrivacyEngineCustomLayerHooksTest(PrivacyEngineCustomLayerTest):
     """Test custom layers with hooks-based approach."""
@@ -1099,7 +1079,3 @@ class PrivacyEngineCustomLayerHooksTest(PrivacyEngineCustomLayerTest):
     def setUp(self) -> None:
         super().setUp()
         self.WRAP_MODEL = False
-
-    def tearDown(self) -> None:
-        """Clean up hooks after each test."""
-        pass

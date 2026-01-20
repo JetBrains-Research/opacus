@@ -152,7 +152,7 @@ class GradientComputationTestAdaptiveClipping(unittest.TestCase):
                     weight_nodp,
                     2,
                     dp=False,
-                    wrap_model=True,
+                    wrap_model=wrap_model,
                 )
                 run_demo(
                     demo_basic,
@@ -162,7 +162,4 @@ class GradientComputationTestAdaptiveClipping(unittest.TestCase):
                     wrap_model=wrap_model,
                 )
 
-                self.assertTrue(
-                    torch.allclose(weight_dp, weight_nodp, atol=1e-5, rtol=1e-3),
-                    f"Failed for wrap_model={wrap_model}",
-                )
+                self.assertTrue(torch.allclose(weight_dp, weight_nodp, atol=1e-5, rtol=1e-3))

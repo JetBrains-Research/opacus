@@ -14,6 +14,10 @@
 # limitations under the License.
 
 import torch
+from typing import Union
+from opacus.grad_sample import (
+    GradSampleModuleFastGradientClipping, GradSampleHooksFastGradientClipping
+)
 from opacus.optimizers import DPOptimizerFastGradientClipping
 
 
@@ -24,7 +28,7 @@ class DPTensorFastGradientClipping:
 
     def __init__(
         self,
-        module,  # Union[GradSampleModuleFastGradientClipping, GradSampleHooksFastGradientClipping]
+        module:  Union[GradSampleModuleFastGradientClipping, GradSampleHooksFastGradientClipping],
         optimizer: DPOptimizerFastGradientClipping,
         loss_per_sample: torch.Tensor,
         loss_reduction: str = "mean",
@@ -32,7 +36,7 @@ class DPTensorFastGradientClipping:
         """
 
         Args:
-            module: the module or hooks to train (GradSampleModuleFastGradientClipping or GradSampleHooksFastGradientClipping)
+            module: the module or hooks to train
             optimizer: the optimizer used to train the module
             loss_per_sample: loss on each sample in the mini-batch of size [batch_size, 1]
 
@@ -203,7 +207,7 @@ class DPLossFastGradientClipping:
 
     def __init__(
         self,
-        module,  # Union[GradSampleModuleFastGradientClipping, GradSampleHooksFastGradientClipping]
+        module:  Union[GradSampleModuleFastGradientClipping, GradSampleHooksFastGradientClipping],
         optimizer: DPOptimizerFastGradientClipping,
         criterion,
         loss_reduction: str = "mean",
@@ -214,11 +218,14 @@ class DPLossFastGradientClipping:
         ], "loss_reduction should be either 'mean' or 'sum'"
 
         # if the criterion is missing reduction attribute, use module's reduction attribute'
-        if hasattr(criterion, "reduction"):
+        if not hasattr(criterion, "reduction"):
             setattr(criterion, "reduction", module.loss_reduction)
 
         assert (
-            loss_reduction == module.loss_reduction == optimizer.loss_reduction
+            loss_reduction
+            == criterion.reduction
+            == module.loss_reduction
+            == optimizer.loss_reduction
         ), "loss_reduction should be the same across GradSampleModule, Optimizer, Criterion, and loss_reduction"
 
         self.optimizer = optimizer

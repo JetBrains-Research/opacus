@@ -65,7 +65,7 @@ class GradSampleHooksFastGradientClippingTest(unittest.TestCase):
         self.assertIsInstance(model, SimpleModel)
 
         # Hooks should be installed
-        self.assertTrue(len(hooks.autograd_grad_sample_hooks) > 0)
+        self.assertTrue(len(hooks._module.autograd_grad_sample_hooks) > 0)
         self.assertTrue(hooks.hooks_enabled)
 
         # Clean up
@@ -243,7 +243,7 @@ class GradSampleHooksFastGradientClippingTest(unittest.TestCase):
         )
 
         # Verify hooks and attributes exist
-        self.assertTrue(len(hooks.autograd_grad_sample_hooks) > 0)
+        self.assertTrue(len(hooks._module.autograd_grad_sample_hooks) > 0)
         for param in model.parameters():
             self.assertTrue(hasattr(param, "_forward_counter"))
 
@@ -251,7 +251,7 @@ class GradSampleHooksFastGradientClippingTest(unittest.TestCase):
         hooks.cleanup()
 
         # Verify hooks are removed
-        self.assertFalse(hasattr(hooks, "autograd_grad_sample_hooks"))
+        self.assertFalse(hasattr(hooks._module, "autograd_grad_sample_hooks"))
 
         # Verify attributes are removed
         for param in model.parameters():
