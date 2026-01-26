@@ -89,10 +89,12 @@ class UniformWithReplacementSampler(Sampler[List[int]]):
             )
             indices = mask.nonzero(as_tuple=False).reshape(-1).tolist()
 
+            # IMPORTANT: Decrement num_batches BEFORE checking if batch is empty.
+            # This ensures all sampling attempts are counted for privacy accounting,
+            # even when batches are empty and not yielded.
             num_batches -= 1
 
-            # Only yield non-empty batches, but count all sampling rounds
-            # for correct privacy accounting
+            # Only yield non-empty batches to user code
             if len(indices) > 0:
                 yield indices
 

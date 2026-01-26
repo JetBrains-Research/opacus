@@ -170,7 +170,7 @@ class DPDataLoader(DataLoader):
                 "\n\nMigration guide:"
                 "\n  Before: DPDataLoader.from_data_loader(dl, batch_first=True, rand_on_empty=False)"
                 "\n  After:  DPDataLoader.from_data_loader(dl)  # Parameters removed"
-                "\n\nFor more details, see API_REVIEW_SUGGESTIONS.md or the documentation."
+                "\n\nFor more details, see the CHANGELOG or documentation."
             )
 
         if isinstance(data_loader.dataset, IterableDataset):
