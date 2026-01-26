@@ -24,6 +24,21 @@ class UniformWithReplacementSampler(Sampler[List[int]]):
     This sampler samples elements according to the Sampled Gaussian Mechanism.
     Each sample is selected with a probability equal to ``sample_rate``.
     The sampler generates ``steps`` number of batches, that defaults to 1/``sample_rate``.
+    
+    .. note::
+        Empty batches (where no samples are selected) are automatically skipped during
+        iteration, but all sampling rounds are still counted for privacy accounting.
+        This means ``len(sampler)`` returns the total number of sampling rounds, not
+        the actual number of batches yielded.
+        
+    Example:
+        >>> sampler = UniformWithReplacementSampler(
+        ...     num_samples=100, sample_rate=0.01, steps=100
+        ... )
+        >>> len(sampler)  # Returns 100 for privacy accounting
+        100
+        >>> actual_batches = sum(1 for _ in sampler)  # ~63 non-empty batches on average
+        >>> print(f"Yielded {actual_batches} non-empty batches out of {len(sampler)} sampling rounds")
     """
 
     def __init__(
@@ -52,6 +67,17 @@ class UniformWithReplacementSampler(Sampler[List[int]]):
             self.steps = int(1 / self.sample_rate)
 
     def __len__(self):
+        """
+        Returns the number of sampling rounds for privacy accounting.
+        
+        .. important::
+            This returns the total number of sampling attempts (``steps``), not the
+            actual number of non-empty batches that will be yielded. Empty batches
+            are skipped during iteration, but they still consume privacy budget.
+            
+        Returns:
+            int: Number of sampling rounds (steps) used for privacy accounting.
+        """
         return self.steps
 
     def __iter__(self):

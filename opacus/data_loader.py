@@ -11,10 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import logging
-from functools import partial
-from typing import Any, List, Optional, Sequence, Tuple, Type, Union
+from typing import List, Optional
 
 import torch
 from opacus.utils.uniform_sampler import (
@@ -29,115 +27,44 @@ from torch.utils.data.dataloader import _collate_fn_t
 logger = logging.getLogger(__name__)
 
 
-def collate(
-    batch: List[torch.Tensor],
-    *,
-    collate_fn: Optional[_collate_fn_t],
-    sample_empty_shapes: Sequence[Tuple],
-    dtypes: Sequence[Union[torch.dtype, Type]],
-):
-    """
-    Wraps `collate_fn` to handle empty batches.
-
-    Default `collate_fn` implementations typically can't handle batches of length zero.
-    Since this is a possible case for poisson sampling, we need to wrap the collate
-    method, producing tensors with the correct shape and size (albeit the batch
-    dimension being zero-size)
-
-    Args:
-        batch: List of tensort to be passed to collate_fn implementation
-        collate_fn: Collame method to be wrapped
-        sample_empty_shapes: Sample tensors with the expected shape
-        dtypes: Expected dtypes
-
-    Returns:
-        Batch tensor(s)
-    """
-
-    if len(batch) > 0:
-        return collate_fn(batch)
-    else:
-        return [
-            torch.zeros(shape, dtype=dtype)
-            for shape, dtype in zip(sample_empty_shapes, dtypes)
-        ]
-
-
-def wrap_collate_with_empty(
-    *,
-    collate_fn: Optional[_collate_fn_t],
-    sample_empty_shapes: Sequence[Tuple],
-    dtypes: Sequence[Union[torch.dtype, Type]],
-):
-    """
-    Wraps given collate function to handle empty batches.
-
-    Args:
-        collate_fn: collate function to wrap
-        sample_empty_shapes: expected shape for a batch of size 0. Input is a sequence -
-            one for each tensor in the dataset
-
-    Returns:
-        New collate function, which is equivalent to input ``collate_fn`` for non-empty
-        batches and outputs empty tensors with shapes from ``sample_empty_shapes`` if
-        the input batch is of size 0
-    """
-
-    return partial(
-        collate,
-        collate_fn=collate_fn,
-        sample_empty_shapes=sample_empty_shapes,
-        dtypes=dtypes,
-    )
-
-
-def shape_safe(x: Any) -> Tuple:
-    """
-    Exception-safe getter for ``shape`` attribute
-
-    Args:
-        x: any object
-
-    Returns:
-        ``x.shape`` if attribute exists, empty tuple otherwise
-    """
-    return getattr(x, "shape", ())
-
-
-def dtype_safe(x: Any) -> Union[torch.dtype, Type]:
-    """
-    Exception-safe getter for ``dtype`` attribute
-
-    Args:
-        x: any object
-
-    Returns:
-        ``x.dtype`` if attribute exists, type of x otherwise
-    """
-    return getattr(x, "dtype", type(x))
-
-
 class DPDataLoader(DataLoader):
     """
-    DataLoader subclass that always does Poisson sampling and supports empty batches
-    by default.
+    DataLoader subclass that always does Poisson sampling.
 
     Typically instantiated via ``DPDataLoader.from_data_loader()`` method based
-    on another DataLoader. DPDataLoader would preserve the behaviour of the original
-    data loader, except for the two aspects.
+    on another DataLoader. DPDataLoader preserves all attributes of the original
+    data loader (batch size, num_workers, etc.) except for the sampling mechanism,
+    which is replaced with ``UniformWithReplacementSampler`` for privacy-preserving
+    Poisson sampling.
 
-    First, it switches ``batch_sampler`` to ``UniformWithReplacementSampler``, thus enabling
-    Poisson sampling (i.e. each element in the dataset is selected to be in the
-    next batch with a certain probability defined by ``sample_rate`` parameter).
-    NB: this typically leads to a batches of variable size.
-    NB2: By default, ``sample_rate`` is calculated based on the ``batch_size`` of the
-    original data loader, so that the average batch size stays the same
+    Key differences from standard DataLoader:
+        - Uses Poisson sampling: each sample included with probability ``sample_rate``
+        - Batch sizes are variable (not fixed like standard DataLoader)
+        - Empty batches are automatically skipped during iteration
+        - Average batch size equals original ``batch_size`` when ``sample_rate = batch_size / dataset_size``
 
-    Second, it wraps collate function with support for empty batches.
-    Most PyTorch modules will happily process tensors of shape ``(0, N, ...)``,
-    but many collate functions will fail to produce such a batch. As with the
-    Poisson sampling empty batches become a possibility, we need a DataLoader that
-    can handle them.
+    .. note::
+        **Privacy Accounting**: Empty batches are automatically skipped by the sampler, but all
+        sampling rounds are counted for correct privacy accounting. This means ``len(dataloader)``
+        returns the total number of sampling rounds (for privacy budget calculation), not the
+        actual number of batches yielded.
+
+    .. versionchanged:: 1.5.5
+        Removed ``batch_first`` and ``rand_on_empty`` parameters. Empty batches are now
+        automatically skipped by the sampler, eliminating the need for special collate
+        function handling.
+
+    Example:
+        >>> from torch.utils.data import TensorDataset, DataLoader
+        >>> dataset = TensorDataset(torch.randn(100, 10))
+        >>> original_loader = DataLoader(dataset, batch_size=10)
+        >>> dp_loader = DPDataLoader.from_data_loader(original_loader)
+        >>> 
+        >>> # Privacy accounting uses total sampling rounds
+        >>> len(dp_loader.batch_sampler)  # e.g., 10 sampling rounds
+        >>> 
+        >>> # But actual batches yielded may be fewer due to skipped empty batches
+        >>> actual_batches = sum(1 for _ in dp_loader)  # e.g., 9 non-empty batches
     """
 
     def __init__(
@@ -187,8 +114,6 @@ class DPDataLoader(DataLoader):
                 sample_rate=sample_rate,
                 generator=generator,
             )
-        sample_empty_shapes = [(0, *shape_safe(x)) for x in dataset[0]]
-        dtypes = [dtype_safe(x) for x in dataset[0]]
         if collate_fn is None:
             collate_fn = default_collate
 
@@ -200,18 +125,19 @@ class DPDataLoader(DataLoader):
         super().__init__(
             dataset=dataset,
             batch_sampler=batch_sampler,
-            collate_fn=wrap_collate_with_empty(
-                collate_fn=collate_fn,
-                sample_empty_shapes=sample_empty_shapes,
-                dtypes=dtypes,
-            ),
+            collate_fn=collate_fn,
             generator=generator,
             **kwargs,
         )
 
     @classmethod
     def from_data_loader(
-        cls, data_loader: DataLoader, *, distributed: bool = False, generator=None
+        cls,
+        data_loader: DataLoader,
+        *,
+        distributed: bool = False,
+        generator=None,
+        **kwargs,
     ):
         """
         Creates new ``DPDataLoader`` based on passed ``data_loader`` argument.
@@ -226,12 +152,22 @@ class DPDataLoader(DataLoader):
             New DPDataLoader instance, with all attributes and parameters inherited
             from the original data loader, except for sampling mechanism.
 
+        Raises:
+            ValueError: If deprecated parameters ``batch_first`` or ``rand_on_empty`` are provided.
+
         Examples:
             >>> x, y = torch.randn(64, 5), torch.randint(0, 2, (64,))
             >>> dataset = TensorDataset(x,y)
             >>> data_loader = DataLoader(dataset, batch_size=4)
             >>> dp_data_loader = DPDataLoader.from_data_loader(data_loader)
         """
+        # Check for deprecated parameters
+        if "batch_first" in kwargs or "rand_on_empty" in kwargs:
+            raise ValueError(
+                "Parameters 'batch_first' and 'rand_on_empty' have been removed. "
+                "Empty batches are now automatically skipped by the sampler. "
+                "These parameters are no longer needed. Please remove them from your code."
+            )
 
         if isinstance(data_loader.dataset, IterableDataset):
             raise ValueError("Uniform sampling is not supported for IterableDataset")
