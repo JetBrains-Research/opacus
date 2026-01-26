@@ -164,9 +164,13 @@ class DPDataLoader(DataLoader):
         # Check for deprecated parameters
         if "batch_first" in kwargs or "rand_on_empty" in kwargs:
             raise ValueError(
-                "Parameters 'batch_first' and 'rand_on_empty' have been removed. "
-                "Empty batches are now automatically skipped by the sampler. "
-                "These parameters are no longer needed. Please remove them from your code."
+                "Parameters 'batch_first' and 'rand_on_empty' have been removed in this version. "
+                "Empty batches are now automatically skipped by the sampler, eliminating the need "
+                "for special collate function handling. These parameters are no longer needed. "
+                "\n\nMigration guide:"
+                "\n  Before: DPDataLoader.from_data_loader(dl, batch_first=True, rand_on_empty=False)"
+                "\n  After:  DPDataLoader.from_data_loader(dl)  # Parameters removed"
+                "\n\nFor more details, see API_REVIEW_SUGGESTIONS.md or the documentation."
             )
 
         if isinstance(data_loader.dataset, IterableDataset):
