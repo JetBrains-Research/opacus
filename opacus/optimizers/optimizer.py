@@ -245,6 +245,7 @@ class DPOptimizer(Optimizer):
         self.secure_mode = secure_mode
         self._step_skip_queue = []
         self._is_last_step_skipped = False
+        self._accumulation_counter = 0
 
         for p in self.params:
             p.summed_grad = None
@@ -486,6 +487,8 @@ class DPOptimizer(Optimizer):
 
             _mark_as_processed(p.grad_sample)
 
+        self._accumulation_counter += 1
+
     def add_noise(self):
         """
         Adds noise to clipped gradients. Stores clipped and noised result in ``p.grad``
@@ -513,7 +516,7 @@ class DPOptimizer(Optimizer):
         """
         if self.loss_reduction == "mean":
             for p in self.params:
-                p.grad /= self.expected_batch_size * self.accumulated_iterations
+                p.grad /= self.expected_batch_size * self._accumulation_counter
 
     def zero_grad(self, set_to_none: bool = False):
         """
@@ -545,6 +548,9 @@ class DPOptimizer(Optimizer):
 
             if not self._is_last_step_skipped:
                 p.summed_grad = None
+
+        if not self._is_last_step_skipped:
+            self._accumulation_counter = 0
 
         self.original_optimizer.zero_grad(set_to_none)
 
